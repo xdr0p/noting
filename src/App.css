@@ -1,0 +1,873 @@
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600&display=swap');
+
+/* --- 1. The Foundation --- */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: #1a1a24;
+  font-family: 'Nunito', sans-serif;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden; /* Prevents the whole app from scrolling */
+  color: #d1d1d6;
+}
+
+/* This is the most important part: It forces Row 1, Row 2, and the Editor to stack */
+.app-container {
+  width: 100%;
+  height: 100vh;
+  display: flex;
+  flex-direction: column; 
+}
+
+/* --- 2. ROW 1: TABS (Height: 48px) --- */
+.tab-bar {
+  display: flex;
+  justify-content: space-between;
+  background-color: #0f0f15;
+  height: 48px;
+  min-height: 48px; /* Locked height */
+  flex-shrink: 0;   /* Prevents Row 2 from pushing it up */
+  -webkit-app-region: drag;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.titlebar-icon {
+  display: flex;
+  align-items: center;
+  padding: 0 12px 0 16px;
+  flex-shrink: 0;
+}
+
+.titlebar-icon img {
+  width: 18px;
+  height: 18px;
+  opacity: 0.8;
+}
+
+.tabs-wrapper {
+  display: flex;
+  align-items: flex-end; /* Tabs sit on the bottom of the bar */
+  flex: 1;
+  height: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  padding-right: 16px;
+}
+
+.tabs-wrapper::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between; /* Pushes title to left, X to right */
+  height: 38px;
+  min-width: 120px;
+  max-width: 200px;
+  flex-shrink: 0;
+  background-color: transparent;
+  border-radius: 8px 8px 0 0;
+  padding: 0 6px 0 12px; 
+  cursor: pointer;
+  color: #8b8ba3;
+  margin-right: 4px;
+  -webkit-app-region: no-drag;
+}
+
+.tab.active {
+  background-color: #1a1a24; /* Matches the editor background */
+  color: #d1d1d6; /* Brighter text for the active tab */
+}
+
+.tab.dragging {
+  opacity: 0.4;
+}
+
+/* Only show grabbing cursor during an active drag */
+.tabs-wrapper.is-dragging,
+.tabs-wrapper.is-dragging .tab {
+  cursor: grabbing !important;
+}
+
+/* Freeze all × buttons while a tab drag is in progress */
+.tabs-wrapper.is-dragging .tab-close,
+.tabs-wrapper.is-dragging .add-tab-plus {
+  pointer-events: none;
+}
+
+.tab.drag-over::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  background-color: #ffffff;
+  border-radius: 3px;
+  z-index: 10;
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.6);
+}
+
+
+.tab-title {
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-right: 8px; /* Adds breathing room between text and the X */
+}
+
+.tab-close {
+  background: transparent;
+  border: none;
+  color: #71717a;
+  cursor: pointer !important; /* <-- Added !important here */
+  width: 22px;         
+  height: 22px;        
+  border-radius: 4px;  
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  transition: all 0.2s ease-in-out; 
+  -webkit-app-region: no-drag; 
+}
+
+/* The neat red hover animation! */
+.tab-close:hover {
+  background-color: #e81123;
+  color: #ffffff;
+}
+
+.add-tab-container {
+  display: flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 6px;
+  flex-shrink: 0;
+  align-self: flex-end;
+}
+
+.add-tab-plus {
+  width: 28px;
+  height: 28px;
+  background: none !important;
+  border: none !important;
+  color: #8b8ba3;
+  font-size: 1.2rem;
+  cursor: pointer !important;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  -webkit-app-region: no-drag; 
+}
+
+.add-tab-plus:hover {
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+/* --- 3. ROW 2: MENU (Height: 40px) --- */
+.titlebar {
+  height: 40px;
+  min-height: 40px; 
+  background-color: #14141d;
+  display: flex;
+  align-items: center;
+  justify-content: space-between; /* <-- ADD THIS LINE */
+  padding: 0 15px;
+  flex-shrink: 0; 
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  -webkit-app-region: drag;
+}
+
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 15px; /* This creates a perfect 15px gap between every single element */
+}
+
+.menu-btn {
+  background: none !important;
+  border: none !important;
+  color: #a0a0ab;
+  margin-right: 0; 
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  transition: color 0.15s ease; /* Adds a premium fade effect to all menu buttons */
+  -webkit-app-region: no-drag;
+}
+
+.menu-btn:hover { color: #ffffff; }
+
+/* NEW: Keeps Wrap lit up when it is toggled ON */
+.menu-btn.is-active { color: #ffffff; }
+
+.toolbar-divider {
+  width: 1px;
+  height: 18px;
+  background-color: #3f3f46;
+  margin: 0; 
+}
+
+/* --- FORMATTING BUTTONS --- */
+.format-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  padding: 0;
+  border: none;
+}
+
+.format-btn {
+  background-color: #14141d !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  color: #a0a0ab;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+  font-size: 1rem;
+  -webkit-app-region: no-drag;
+}
+
+.format-btn:hover {
+  color: #ffffff;
+  background-color: #14141d !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+
+.format-btn.is-active {
+  color: #ffffff;
+  background-color: #14141d !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  box-shadow: none;
+  text-shadow: 0 0 8px rgba(255, 255, 255, 0.22);
+}
+
+.format-btn.is-active:hover {
+  color: #ffffff;
+  background-color: #14141d !important;
+}
+
+
+.tab-scroll-btn {
+  background: transparent !important;
+  border: none !important;
+  color: #a0a0ab;
+  width: 26px;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.3rem;
+  font-weight: 300;
+  cursor: pointer;
+  flex-shrink: 0;
+  align-self: flex-end;
+  -webkit-app-region: no-drag;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.tab-scroll-btn:hover:not(:disabled) {
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+.tab-scroll-btn:disabled,
+.tab-scroll-btn.disabled {
+  opacity: 0.25;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* --- 4. WINDOW CONTROLS --- */
+.window-controls {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.control-btn {
+  background: transparent !important;
+  border: none !important;
+  width: 46px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #71717a;
+  -webkit-app-region: no-drag;
+  cursor: pointer;
+}
+
+.control-btn:hover { background-color: rgba(255, 255, 255, 0.1) !important; }
+.control-btn.close:hover { background-color: #e81123 !important; color: white !important; }
+
+/* --- THE NEW WORKSPACE WRAPPER --- */
+.workspace-container {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  overflow: hidden;
+}
+
+/* --- 5. THE EDITOR --- */
+.editor-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  /* When the minimap is open, we seamlessly pull the right edge inward */
+  right: 92px; 
+  transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow-y: scroll; 
+  background-color: #1a1a24;
+  scrollbar-gutter: stable; 
+}
+
+.hide-minimap .editor-container {
+  right: 0px; /* Expands back to the right edge natively */
+}
+
+.notepad {
+  width: 100%;
+  min-height: calc(100% + 2px); 
+  outline: none;
+  padding: 12px 20px 12px 16px !important; 
+  font-size: inherit; 
+  line-height: 1.6;
+  font-family: 'Nunito', sans-serif; 
+}
+
+/* THE BULLETPROOF WRAPPER: Forces unbroken text to wrap BEFORE hitting the padding */
+.notepad p, 
+.notepad h1, 
+.notepad h2, 
+.notepad h3, 
+.notepad li {
+  overflow-wrap: anywhere !important;
+  word-break: break-word !important;
+}
+
+/* --- CUSTOM TEXT SELECTION --- */
+.notepad ::selection,
+.notepad::selection {
+  background-color: rgba(255, 255, 255, 0.2); /* A premium, subtle frosted grey */
+  color: #ffffff; /* Forces the highlighted text to pop bright white */
+}
+
+/* --- SUPERSCRIPT / ^ FORMATTING --- */
+.notepad sup {
+  vertical-align: super;
+  font-size: 0.72em;
+  line-height: 0;
+}
+
+/* --- MAKE BOLD TEXT POP --- */
+.notepad strong, 
+.notepad b {
+  font-weight: 800 !important; /* Forces an extra-thick weight */
+  color: #ffffff; /* Brighter white to stand out from the normal grey text */
+}
+
+/* --- 6. LIST STYLING FIX --- */
+.notepad ul,
+.notepad ol {
+  padding-left: 24px; /* Gives the numbers and bullets room to exist */
+  margin-top: 4px;
+  margin-bottom: 4px;
+}
+
+/* Prevents weird double-spacing inside the list items */
+.notepad li p {
+  margin: 0;
+}
+
+/* --- 5.5 THE FOOTER (STATUS BAR ROW) --- */
+.status-bar-row {
+  height: 28px;
+  min-height: 28px;
+  background-color: #14141d;
+  border-top: 1px solid rgba(255, 255, 255, 0.03);
+  display: flex;
+  align-items: center;
+  /* FIXED: Changed from flex-end to space-between */
+  justify-content: space-between; 
+  padding: 0 15px;
+  flex-shrink: 0;
+  z-index: 20;
+}
+
+.status-bar-left {
+  color: #8b8ba3;
+  font-size: 0.75rem;
+  pointer-events: none; /* Keeps it from accidentally being highlighted/clicked */
+}
+
+.status-bar {
+  color: #8b8ba3;
+  font-size: 0.75rem;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.status-divider {
+  opacity: 0.4;
+  font-weight: 200;
+  pointer-events: none;
+}
+
+.tiptap p.is-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: #8b8ba3; 
+  pointer-events: none;
+  height: 0;
+}
+
+/* FIXED: Brutally forces the placeholder hidden when our JS flag triggers */
+.tiptap.hide-empty-placeholder p::before {
+  content: none !important;
+  display: none !important;
+}
+
+/* --- 7. UNIFIED MODALS (Sleek & Vibey) --- */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  background-color: rgba(0, 0, 0, 0.7); /* Slightly darker backdrop */
+  backdrop-filter: blur(2px); /* Gives a premium frosted glass effect */
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background-color: #1a1a24;
+  padding: 24px;
+  border-radius: 12px; /* Smoother, calmer corners */
+  border: 1px solid rgba(255, 255, 255, 0.08); /* Extremely subtle border */
+  width: 360px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+  text-align: center;
+}
+
+.modal-content h3 {
+  margin-bottom: 8px;
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 1.2rem;
+}
+
+.modal-content p {
+  font-size: 0.9rem;
+  color: #a0a0ab;
+  margin-bottom: 24px;
+  line-height: 1.5;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.modal-btn {
+  flex: 1;
+  padding: 10px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.85rem;
+  transition: all 0.2s ease;
+}
+
+/* Primary actions (Save) - Pops cleanly against the dark app */
+.modal-btn.primary {
+  background-color: #d1d1d6;
+  color: #1a1a24;
+}
+.modal-btn.primary:hover { background-color: #ffffff; }
+
+/* Destructive actions (Close anyway, Don't save) - Subtle red tint */
+.modal-btn.danger {
+  background-color: rgba(232, 17, 35, 0.1);
+  color: #ff5555;
+}
+.modal-btn.danger:hover { background-color: rgba(232, 17, 35, 0.2); }
+
+/* Neutral actions (Cancel) - Hollow and understated */
+.modal-btn.neutral {
+  background-color: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #a0a0ab;
+}
+.modal-btn.neutral:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+  color: #d1d1d6;
+}
+
+/* --- 8. FIND BOX --- */
+.find-box.replace-mode {
+  position: absolute;
+  top: 100px;
+  /* FIXED: 100px perfectly clears the 70px minimap + its padding */
+  right: 100px; 
+  background-color: #1a1a24;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column; 
+  gap: 8px;
+  box-shadow: 0 16px 40px rgba(0,0,0,0.6);
+  z-index: 50;
+  width: 360px; 
+}
+
+.find-row, .replace-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Replace button — softer than primary, more visible than find-btn */
+.find-input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  /* FIXED CENTERING: Replaced padding-based height with explicit height */
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  outline: none;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+
+.find-count {
+  color: #8b8ba3;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  min-width: 45px;
+  /* FIXED CENTERING: Flexbox perfectly centers it inside a 28px tall box */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px; 
+}
+
+.find-btn {
+  background: transparent;
+  border: none;
+  color: #a0a0ab;
+  cursor: pointer;
+  /* FIXED CENTERING: Make it a perfect 28x28 square for our new SVGs */
+  height: 28px;
+  width: 28px; 
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.find-btn.action {
+  /* Restores width for the Replace/All buttons since they have text */
+  width: auto;
+  padding: 0 12px;
+  font-size: 0.75rem;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.find-input:focus {
+  border-color: #3f3f46;
+}
+
+.find-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+}
+
+/* Highlight color for matching text */
+.search-match {
+  background-color: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+}
+
+/* The ONE result you're currently on — stands out in amber */
+.search-match-current {
+  background-color: rgba(255, 185, 50, 0.45);
+  border-radius: 2px;
+  outline: 1px solid rgba(255, 185, 50, 0.7);
+}
+
+/* --- 9. WORD WRAP TOGGLE --- */
+.editor-container.no-wrap {
+  overflow-x: auto; /* Allows horizontal scrolling */
+}
+
+.editor-container.no-wrap .notepad p {
+  white-space: pre; 
+  display: block; 
+  width: max-content;
+  min-width: 100%;
+  padding-right: 20px !important; 
+}
+
+/* Custom Dark Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+/* Default scrollbar behavior (when minimap is hidden) */
+.hide-minimap .editor-container::-webkit-scrollbar {
+  width: 10px;
+  display: block; 
+}
+
+/* Ensure the track is visible to "fill" the empty space */
+.hide-minimap .editor-container::-webkit-scrollbar-track {
+  background: #0f0f15;
+}
+
+/* Keep the editor scrollbars visible when the minimap is open */
+.app-container:not(.hide-minimap) .editor-container::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  display: block;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f0f15;
+}
+
+::-webkit-scrollbar-corner {
+  background:
+    radial-gradient(circle, #5f5f6b 0 2px, transparent 2.5px),
+    #0f0f15;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f3f46; /* Light gray/white color */
+  border-radius: 10px;
+  border: 2px solid #0f0f15; /* Keeps it looking clean */
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #ffffff; /* Glows pure white when you hover it */
+}
+
+.context-menu {
+  position: fixed;
+  background: #1a1a24;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 5px;
+  z-index: 2000;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+  min-width: 150px;
+}
+
+.context-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: #d1d1d6;
+  cursor: pointer;
+  font-size: 0.85rem;
+  border-radius: 4px;
+}
+
+.context-menu button:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #ffffff;
+}
+
+/* Ensure the Go To Line input looks consistent */
+.modal-content input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.modal-content input::-webkit-outer-spin-button,
+.modal-content input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Add a subtle highlight when you hover over context menu items */
+.context-menu button:active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* --- 10. PDF EXPORT STYLES --- */
+@media print {
+  /* Hide all app UI elements */
+  .tab-bar, .titlebar, .status-bar-row, .find-box, .context-menu, .modal-overlay, .minimap-container {
+    display: none !important;
+  }
+  
+  /* Allow the editor to expand infinitely for the PDF pages */
+  .app-container, .editor-container, body {
+    height: auto !important;
+    overflow: visible !important;
+    background-color: white !important; 
+    color: black !important;
+  }
+  
+  /* Update the notepad padding to make room for the wider map */
+  .notepad {
+    width: 100%;
+    min-height: 101%; 
+    outline: none;
+    padding: 12px 24px 12px 16px; 
+    font-size: 12pt !important; 
+    line-height: 1.6;
+    font-family: 'Nunito', sans-serif; 
+    transition: padding-right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .notepad strong,
+  .notepad b {
+    color: black !important;
+    font-weight: 800 !important;
+  }
+}
+
+/* --- 11. THE SCROLL MINIMAP --- */
+.minimap-container {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 92px;
+  height: 100%;
+  background-color: #14141d; 
+  border-left: 1px solid rgba(255, 255, 255, 0.05); 
+  overflow: hidden;
+  z-index: 10;
+  pointer-events: auto;
+  cursor: pointer;
+  
+  /* Slide the map in using hardware acceleration */
+  transform: translateX(0);
+  opacity: 1;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.25s ease;
+}
+
+/* When hidden, cleanly push it off to the right */
+.hide-minimap .minimap-container {
+  transform: translateX(92px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.minimap-viewport {
+  position: absolute;
+  left: 16px; 
+  width: 60px; 
+  background-color: rgba(255, 255, 255, 0.08); 
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  z-index: 10;
+  will-change: transform, height;
+  cursor: grab;
+  transition: background-color 0.15s ease, border 0.15s ease;
+  overflow: hidden; /* FIXED: Traps the tiny text completely inside the box! */
+}
+
+.minimap-viewport:hover,
+.minimap-viewport.is-dragging {
+  background-color: rgba(255, 255, 255, 0.15); 
+  border: 1px solid rgba(255, 255, 255, 0.2); 
+}
+
+.minimap-content {
+  position: absolute;
+  left: 0; 
+  /* Width is now fully controlled by our real-time JS engine */
+  transform-origin: top left;
+  /* Matches the exact padding of the notepad to guarantee 1:1 line breaks */
+  padding: 12px 20px 12px 16px !important; 
+  opacity: 0.6; 
+  will-change: transform, width; 
+  pointer-events: none;
+  box-sizing: border-box; /* Ensures the padding doesn't break our math */
+}
+
+.minimap-content * {
+  color: #a0a0ab !important; 
+  font-family: 'Nunito', sans-serif;
+  line-height: 1.6;
+  
+  /* FIXED: Aggressively forces text to wrap inside the box, even without spaces */
+  word-wrap: break-word !important;
+  overflow-wrap: anywhere !important;
+  word-break: break-all !important;
+  white-space: pre-wrap !important;
+}
+
+/* --- 12. FLOW STATE ANIMATION --- */
+.titlebar-right {
+  display: flex;
+  align-items: center;
+  /* 14px + 15px (titlebar padding) + 17px (half button) = 46px. */
+  /* This perfectly centers the button above the 92px minimap track! */
+  padding-right: 14px; 
+}
+
+.fun-animation-btn {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  border-radius: 6px;
+  transition: background-color 0.2s ease;
+  -webkit-app-region: no-drag; /* Ensures you can click it without dragging the window */
+}
+
+.fun-animation-btn:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}
+
+.dot {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background-color: rgb(82, 82, 91); /* The resting color you set in JS */
+  will-change: transform, background-color; /* Tells the browser to optimize for 60fps */
+}
