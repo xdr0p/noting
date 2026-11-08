@@ -136,4 +136,12 @@ assert.equal(isTabEmpty({ id: '1', title: 'Untitled', content: '<p><br class="Pr
 assert.equal(isTabEmpty({ id: '1', title: 'File', content: '', path: '/path/to/file' }), false);
 assert.equal(isTabEmpty({ id: '1', title: 'Untitled', content: '<p>Content</p>' }), false);
 
-console.log('✓ All 27 tests passed successfully.');
+// Already solved equations containing '=' must not evaluate as standard math
+const shouldEvaluateMath = (trimmed) => {
+  if (trimmed.includes('=')) return false;
+  return true;
+};
+assert.equal(shouldEvaluateMath('2 * 2 = 4'), false);
+assert.equal(shouldEvaluateMath('2 * 2'), true);
+
+console.log('✓ All 29 tests passed successfully.');

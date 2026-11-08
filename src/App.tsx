@@ -314,6 +314,7 @@ const MathEngine = Extension.create({
           }
 
           // 4. Standard Math Evaluation (e.g., 50 * 2=)
+          if (trimmed.includes('=')) return null;
           const prevResult = getPreviousLineResult(state.doc, range.from);
 
           try {
@@ -366,6 +367,7 @@ const MathEngine = Extension.create({
           }
 
           // 2. Standard Math Evaluation (e.g. 50 * 2) - Enter only intercepts math expressions
+          if (trimmed.includes('=')) return false;
           if (isMathProblem(trimmed)) {
             const prevResult = getPreviousLineResult(state.doc, from);
 
