@@ -723,52 +723,47 @@ function App() {
   const minimapViewportRef = useRef<HTMLDivElement>(null);
   // 1. THE FLOW STATE VARIABLES
   const [isAnimating, setIsAnimating] = useState(false);
-  const [animMode, setAnimMode] = useState(0); 
 
-  // NEW: Refs directly attach to the dots so we can move them at 60fps without lagging React
+  // Refs directly attach to the dots so we can move them at 60fps without lagging React
   const dot1Ref = useRef<HTMLSpanElement>(null);
   const dot2Ref = useRef<HTMLSpanElement>(null);
   const dot3Ref = useRef<HTMLSpanElement>(null);
   const animState = useRef({ mode: 0, prevMode: 0, transitionStart: 0 });
 
-  // 2. THE AUTO-DJ (Randomly cycles animations when turned on)
+  const isAnimRunningRef = useRef(false);
+  const startAnimLoopRef = useRef<() => void>(() => {});
+
+  // 2. THE AUTO-DJ (Randomly cycles animations when turned on without forcing React re-renders)
   useEffect(() => {
     if (!isAnimating) {
-      setAnimMode(0); // Snap back to triangle when turned off
+      animState.current.prevMode = animState.current.mode;
+      animState.current.mode = 0;
+      animState.current.transitionStart = performance.now() / 1000;
       return;
     }
     let timeoutId: ReturnType<typeof setTimeout>;
     const triggerNextAnimation = () => {
-      setAnimMode(prev => {
-        let next = Math.floor(Math.random() * 6) + 1;
-        if (next === prev) {
-          next = (prev % 6) + 1;
-        }
-        return next;
-      });
+      const prev = animState.current.mode;
+      let next = Math.floor(Math.random() * 6) + 1;
+      if (next === prev) {
+        next = (prev % 6) + 1;
+      }
+      animState.current.prevMode = prev;
+      animState.current.mode = next;
+      animState.current.transitionStart = performance.now() / 1000;
+      startAnimLoopRef.current();
+
       timeoutId = setTimeout(triggerNextAnimation, Math.random() * 2000 + 3000);
     };
     triggerNextAnimation();
     return () => clearTimeout(timeoutId);
   }, [isAnimating]);
 
-  const isAnimRunningRef = useRef(false);
-  const startAnimLoopRef = useRef<() => void>(() => {});
-
-  // 3. THE GENERATIVE MATH ENGINE (Flawless Transitions)
-  useEffect(() => {
-    // Updates our internal tracker whenever the React state changes
-    animState.current.prevMode = animState.current.mode;
-    animState.current.mode = animMode;
-    animState.current.transitionStart = performance.now() / 1000;
-    startAnimLoopRef.current();
-  }, [animMode]);
-
   useEffect(() => {
     // animState.current is the source of truth for the current mode.
-    // The separate [animMode] effect owns writes to prevMode/mode/transitionStart.
-    // This loop only reads — do NOT add animMode to the dep array; that would
-    // tear down and rebuild the loop on every auto-DJ cycle for no gain.
+    // The auto-DJ effect owns writes to prevMode/mode/transitionStart directly in the ref
+    // to prevent continuous full-app re-renders during animations.
+    // This loop only reads animState.current.
     if (!isAnimating) {
       const resting = [
         { x: 0, y: -4, c: [82, 82, 91] },

@@ -32,7 +32,6 @@ body {
   height: 48px;
   min-height: 48px; /* Locked height */
   flex-shrink: 0;   /* Prevents Row 2 from pushing it up */
-  -webkit-app-region: drag;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
@@ -79,7 +78,6 @@ body {
   cursor: pointer;
   color: #8b8ba3;
   margin-right: 4px;
-  -webkit-app-region: no-drag;
 }
 
 .tab.active {
@@ -138,7 +136,6 @@ body {
   justify-content: center;
   font-size: 1.1rem;
   transition: all 0.2s ease-in-out; 
-  -webkit-app-region: no-drag; 
 }
 
 /* The neat red hover animation! */
@@ -169,7 +166,6 @@ body {
   align-items: center;
   justify-content: center;
   transition: all 0.15s ease;
-  -webkit-app-region: no-drag; 
 }
 
 .add-tab-plus:hover {
@@ -187,7 +183,6 @@ body {
   padding: 0 15px;
   flex-shrink: 0; 
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  -webkit-app-region: drag;
 }
 
 .titlebar-left {
@@ -206,7 +201,6 @@ body {
   cursor: pointer;
   padding: 0;
   transition: color 0.15s ease; /* Adds a premium fade effect to all menu buttons */
-  -webkit-app-region: no-drag;
 }
 
 .menu-btn:hover { color: #ffffff; }
@@ -245,7 +239,6 @@ body {
   border-radius: 6px;
   transition: color 0.15s ease, border-color 0.15s ease;
   font-size: 1rem;
-  -webkit-app-region: no-drag;
 }
 
 .format-btn:hover {
@@ -283,7 +276,6 @@ body {
   cursor: pointer;
   flex-shrink: 0;
   align-self: flex-end;
-  -webkit-app-region: no-drag;
   transition: all 0.15s ease;
   user-select: none;
 }
@@ -315,7 +307,6 @@ body {
   align-items: center;
   justify-content: center;
   color: #71717a;
-  -webkit-app-region: no-drag;
   cursor: pointer;
 }
 

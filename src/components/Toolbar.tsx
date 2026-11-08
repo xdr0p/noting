@@ -91,9 +91,9 @@ export const Toolbar = memo(function Toolbar({
       <div className="titlebar-right">
         <button 
           type="button"
+          tabIndex={-1}
           className="fun-animation-btn"
           onClick={onToggleAnimation}
-          onMouseDown={(e) => e.stopPropagation()}
           title="Toggle Flow State"
         >
           <span className="dot" ref={dot1Ref}></span>
