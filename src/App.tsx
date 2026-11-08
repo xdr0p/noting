@@ -1,20 +1,35 @@
 import TurndownService from 'turndown';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { Parser } from 'expr-eval';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import SearchAndReplace from '@sereneinserenade/tiptap-search-and-replace';
-import React, { useState, useEffect, useRef } from 'react';
-import { useEditor, EditorContent } from '@tiptap/react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Italic from '@tiptap/extension-italic';
 import Placeholder from '@tiptap/extension-placeholder';
 import CharacterCount from '@tiptap/extension-character-count';
 import { Extension, InputRule } from '@tiptap/core'; 
+import { Selection } from '@tiptap/pm/state';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open, save } from '@tauri-apps/plugin-dialog'; 
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs'; 
 import './App.css';
-import appIcon from './assets/app-icon.png';
+import { Tab, Toast, ContextMenuPos, TabContextMenuPos } from './types';
+import { TabBar } from './components/TabBar';
+import { Toolbar } from './components/Toolbar';
+import { SearchBox } from './components/SearchBox';
+import { Minimap } from './components/Minimap';
+import { StatusBar } from './components/StatusBar';
+import { ToastNotification } from './components/Toast';
+import { EditorPane } from './components/EditorPane';
+import { UnsavedModal } from './components/modals/UnsavedModal';
+import { QuitModal } from './components/modals/QuitModal';
+import { GoToLineModal } from './components/modals/GoToLineModal';
+import { RecentFilesModal } from './components/modals/RecentFilesModal';
+import { ContextMenu } from './components/modals/ContextMenu';
+import { TabContextMenu } from './components/modals/TabContextMenu';
 
 
 // Custom Italic extension that disables default asterisk/underscore input rules
@@ -81,12 +96,14 @@ const makeExponentsPretty = (expression: string) => {
   });
 };
 
+const mathParser = new Parser();
+
 const normalizeSuperscriptForMath = (expression: string) => {
   const superscriptRun = new RegExp(`(\\d+|\\))([${SUPERSCRIPT_CHARS}]+)`, 'g');
 
   return expression.replace(superscriptRun, (_match, base, exponent) => {
     const normalExponent = fromSuperscript(exponent);
-    return `${base}**${normalExponent.startsWith('-') ? `(${normalExponent})` : normalExponent}`;
+    return `${base}^${normalExponent.startsWith('-') ? `(${normalExponent})` : normalExponent}`;
   });
 };
 
@@ -124,18 +141,39 @@ const buildMathExpression = (expression: string, prevResult?: number | null) => 
   }
 
   return normalizeSuperscriptForMath(expr)
+    // Group negative exponents — output ^ (expr-eval operator)
     .replace(/\^(-?[0-9]+(?:\.[0-9]+)?)/g, (_match, exponent) => {
-      return `**${exponent.startsWith('-') ? `(${exponent})` : exponent}`;
+      return `^${exponent.startsWith('-') ? `(${exponent})` : exponent}`;
     })
-    .replace(/\^/g, '**')
-    .replace(/[^0-9\+\-\*\/\.\(\)]/g, '');
+    // Accept user-typed ** as an alternate exponent syntax
+    .replace(/\*\*/g, '^')
+    // Implicit multiplication — expr-eval throws on juxtaposition
+    .replace(/\)\s*\(/g, ')*(')
+    .replace(/(\d)\s*\(/g, '$1*(')
+    .replace(/\)\s*(\d)/g, ')*$1')
+    // Whitelist ^ so it survives
+    .replace(/[^0-9\+\-\*\/\.\(\)\^]/g, '');
 };
 
-const formatMathExpression = (expression: string) => {
-  return makeExponentsPretty(expression.replace(/,/g, '').replace(/\s+/g, ''))
+const formatMathSide = (expr: string) => {
+  return makeExponentsPretty(expr.replace(/,/g, '').replace(/\s+/g, ''))
     .replace(/([\+\-\*\/])/g, ' $1 ')
     .replace(/\s+/g, ' ')
     .trim();
+};
+
+const formatEquation = (eqStr: string) => {
+  const parts = eqStr.split('=');
+  if (parts.length === 2) {
+    const left = formatMathSide(parts[0]);
+    const right = formatMathSide(parts[1]);
+    return `${left} = ${right}`;
+  }
+  return formatMathSide(eqStr);
+};
+
+const formatMathExpression = (expression: string) => {
+  return formatMathSide(expression);
 };
 
 const AutoExponent = Extension.create({
@@ -172,13 +210,13 @@ const MathSpacing = Extension.create({
   addInputRules() {
     return [
       new InputRule({
-        find: /([0-9\)⁰¹²³⁴⁵⁶⁷⁸⁹])([\+\-\*\/])$/,
+        find: /([0-9a-zA-Z\)\u00B9\u00B2\u00B3\u2070-\u207F])([\+\-\*\/])$/,
         handler: ({ state, range, match }) => {
           state.tr.insertText(`${match[1]} ${match[2]} `, range.from, range.to);
         },
       }),
       new InputRule({
-        find: /([\+\-\*\/])([0-9])$/,
+        find: /([\+\-\*\/])([0-9a-zA-Z])$/,
         handler: ({ state, range, match }) => {
           state.tr.insertText(`${match[1]} ${match[2]}`, range.from, range.to);
         },
@@ -202,13 +240,17 @@ const solveLinearEquation = (eqStr: string): { variable: string; value: number }
   const right = parts[1].trim();
 
   // Look for single variable letter (x, y, z, etc.)
-  const varMatch = (left + ' ' + right).match(/\b([a-zA-Z])\b/);
+  const cleanForVar = (left + ' ' + right).replace(/ans/gi, '0');
+  const varMatch = cleanForVar.match(/(?:^|[^a-zA-Z])([a-zA-Z])(?:[^a-zA-Z]|$)/);
   if (!varMatch) return null;
   const variable = varMatch[1];
 
   const evalSide = (exprStr: string, varVal: number) => {
-    const clean = buildMathExpression(exprStr.replace(new RegExp(`\\b${variable}\\b`, 'gi'), `(${varVal})`));
-    return new Function(`return ${clean}`)();
+    const withImplicit = exprStr
+      .replace(new RegExp(`(\\d)\\s*${variable}\\b`, 'gi'), `$1*(${varVal})`)
+      .replace(new RegExp(`\\b${variable}\\b`, 'gi'), `(${varVal})`);
+    const clean = buildMathExpression(withImplicit);
+    return mathParser.parse(clean).evaluate();
   };
 
   try {
@@ -243,29 +285,41 @@ const MathEngine = Extension.create({
           const leadingSpaces = expression.match(/^\s*/)?.[0] || '';
           const trimmed = expression.trim();
           
-          // 1. Solve Equation (e.g., 10 = 3 + x)
+          // 1. Solve Equation (e.g., 10 = 3 + x or x * 1 = 5)
           if (trimmed.includes('=')) {
             const sol = solveLinearEquation(trimmed);
             if (sol) {
-              state.tr.insertText(`${leadingSpaces}${trimmed}  =>  ${sol.variable} = ${sol.value.toLocaleString()} `, range.from, range.to);
+              const formattedEq = formatEquation(trimmed);
+              state.tr.insertText(`${leadingSpaces}${formattedEq}  =>  ${sol.variable} = ${sol.value.toLocaleString()} `, range.from, range.to);
               return;
             }
           }
 
           // 2. Standalone number: 10= becomes 10 = (formatted with commas if long)
           if (/^\d+(\.\d+)?$/.test(trimmed)) {
-            const formatted = Number(trimmed).toLocaleString();
+            const [intPart, decPart] = trimmed.split('.');
+            const formattedInt = Number(intPart).toLocaleString();
+            const formatted = decPart !== undefined ? `${formattedInt}.${decPart}` : formattedInt;
             state.tr.insertText(`${leadingSpaces}${formatted} = `, range.from, range.to);
             return;
           }
 
-          // 3. Standard Math Evaluation (e.g., 50 * 2=)
+          // 3. Expression with unknown variable: typing = formats it as an equation start (e.g., x * 1= becomes x * 1 = )
+          const cleanForVar = trimmed.replace(/ans/gi, '0');
+          const varMatch = cleanForVar.match(/(?:^|[^a-zA-Z])([a-zA-Z])(?:[^a-zA-Z]|$)/);
+          if (varMatch && !trimmed.includes('=')) {
+            const formatted = formatMathSide(trimmed);
+            state.tr.insertText(`${leadingSpaces}${formatted} = `, range.from, range.to);
+            return;
+          }
+
+          // 4. Standard Math Evaluation (e.g., 50 * 2=)
           const prevResult = getPreviousLineResult(state.doc, range.from);
 
           try {
             const cleanExpr = buildMathExpression(trimmed, prevResult);
             if (!cleanExpr) return null;
-            const result = new Function(`return ${cleanExpr}`)();
+            const result = mathParser.parse(cleanExpr).evaluate();
             if (!Number.isFinite(result)) return null;
 
             const rounded = Math.round(result * 10000) / 10000;
@@ -303,8 +357,9 @@ const MathEngine = Extension.create({
           if (trimmed.includes('=')) {
             const sol = solveLinearEquation(trimmed);
             if (sol) {
+              const formattedEq = formatEquation(trimmed);
               this.editor.view.dispatch(
-                state.tr.insertText(`${leadingSpaces}${trimmed}  =>  ${sol.variable} = ${sol.value.toLocaleString()} `, from, to)
+                state.tr.insertText(`${leadingSpaces}${formattedEq}  =>  ${sol.variable} = ${sol.value.toLocaleString()} `, from, to)
               );
               return true;
             }
@@ -317,7 +372,7 @@ const MathEngine = Extension.create({
             try {
               const cleanExpr = buildMathExpression(trimmed, prevResult);
               if (!cleanExpr) return false;
-              const result = new Function(`return ${cleanExpr}`)();
+              const result = mathParser.parse(cleanExpr).evaluate();
               
               if (!Number.isFinite(result)) return false;
 
@@ -341,29 +396,32 @@ const MathEngine = Extension.create({
   },
 });
 
-interface Tab {
-  id: string;
-  title: string;
-  content: string;
-  path?: string;
-  isDirty?: boolean;
-  isPinned?: boolean;
-}
 
-let isForceClosing = false;
-let globalUnlisten: (() => void) | null = null;
 
 const turndownService = new TurndownService({
   headingStyle: 'atx',
   codeBlockStyle: 'fenced',
 });
 
-const createTabId = () => Math.random().toString(36).substring(2, 9);
+const getMarkdown = (html: string): string => {
+  return turndownService.turndown(html);
+};
+
+const PURIFY_CONFIG = {
+  ALLOWED_TAGS: ['p','br','h1','h2','h3','h4','h5','h6',
+                 'strong','em','s','del','u','code','pre','blockquote',
+                 'ul','ol','li','hr','a','sup','sub','span'],
+  ALLOWED_ATTR: ['href','target','rel','class'],
+  FORBID_TAGS:  ['script','style','iframe','object','embed','form','input','button','svg','math'],
+  FORBID_ATTR:  ['style'],
+};
+
+const createTabId = () => crypto.randomUUID();
 
 const parseFileContent = async (rawText: string): Promise<string> => {
   const parsed = await marked.parse(rawText);
   const rawHtml = typeof parsed === 'string' ? parsed : String(parsed);
-  return DOMPurify.sanitize(rawHtml);
+  return DOMPurify.sanitize(rawHtml, PURIFY_CONFIG);
 };
 
 const titleFromPath = (path: string, fallback = 'Untitled') =>
@@ -377,39 +435,213 @@ const titleFromText = (text: string) => {
 const suggestedFileName = (title: string) =>
   title.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '').trim() || 'Untitled';
 
-const isEmptyUntitledTab = (tab: Tab) =>
-  !tab.path && (tab.content === '<p></p>' || tab.content === '');
+const isTabEmpty = (tab: Tab, activeEditor?: any, activeId?: string) => {
+  if (tab.path) return false;
+  if (tab.id === activeId && activeEditor) return activeEditor.isEmpty;
+  return tab.content === '' || tab.content === '<p></p>'
+    || tab.content === '<p><br></p>'
+    || tab.content === '<p><br class="ProseMirror-trailingBreak"></p>';
+};
 
-const isBlankUnsavedTab = (tab: Tab) => isEmptyUntitledTab(tab) && !tab.isDirty;
+const isEmptyUntitledTab = (tab: Tab, activeEditor?: any, activeId?: string) =>
+  !tab.path && isTabEmpty(tab, activeEditor, activeId);
+
+const isBlankUnsavedTab = (tab: Tab, activeEditor?: any, activeId?: string) =>
+  isEmptyUntitledTab(tab, activeEditor, activeId) && !tab.isDirty;
 
 const updatePlaceholderVisibility = (editor: any) => {
-  let textBlockCount = 0;
-  editor.state.doc.descendants((node: any) => {
-    if (node.isTextblock) textBlockCount++;
-  });
-
-  // FIXED: Hide the placeholder if there's more than 1 block, OR if there's any actual text.
-  const hasText = editor.state.doc.textContent.trim() !== '';
-  const shouldHidePlaceholder = textBlockCount > 1 || hasText;
-  
-  editor.view.dom.classList.toggle('hide-empty-placeholder', shouldHidePlaceholder);
+  const shouldHide = editor.state.doc.childCount > 1
+    || (editor.state.doc.firstChild?.content.size ?? 0) > 0;
+  editor.view.dom.classList.toggle('hide-empty-placeholder', shouldHide);
 };
 
-const getConstrainedPos = (pos: { x: number; y: number } | null, menuWidth = 160, menuHeight = 180) => {
-  if (!pos) return { top: 0, left: 0 };
-  const left = Math.min(pos.x, Math.max(10, window.innerWidth - menuWidth - 10));
-  const top = Math.min(pos.y, Math.max(10, window.innerHeight - menuHeight - 10));
-  return { top, left };
-};
+
 
 function App() {
-  const appWindow = getCurrentWindow();
+  const appWindow = useMemo(() => getCurrentWindow(), []);
+  const isForceClosingRef = useRef(false);
+
+  const [toast, setToast] = useState<Toast | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((message: string, type: 'info' | 'error' | 'success' = 'info') => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToast({ id: String(Date.now()), message, type });
+    toastTimerRef.current = setTimeout(() => {
+      setToast(null);
+    }, 4000);
+  }, []);
+
+  const dragRef = useRef<{ onMove: (e: MouseEvent) => void; onUp: () => void } | null>(null);
+
+  useEffect(() => () => {
+    if (dragRef.current) {
+      window.removeEventListener('mousemove', dragRef.current.onMove);
+      window.removeEventListener('mouseup', dragRef.current.onUp);
+      dragRef.current = null;
+    }
+  }, []);
   
   // 1. ALL STATE DECLARED EXACTLY ONCE
   const [draggedTabId, setDraggedTabId] = useState<string | null>(null);
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([{ id: '1', title: 'Untitled', content: '', isDirty: false }]);
   const [activeTabId, setActiveTabId] = useState('1');
+
+  // contentMapRef is the live, synchronous source of truth for tab content.
+  // The tabs state array is eventually consistent via the 250ms debounce (3.5).
+  const contentMapRef = useRef<Map<string, string>>(new Map());
+
+  // Seed on mount and when new tabs appear (additive only)
+  useEffect(() => {
+    for (const t of tabs) {
+      if (!contentMapRef.current.has(t.id)) {
+        contentMapRef.current.set(t.id, t.content);
+      }
+    }
+    // Prune closed tabs
+    const live = new Set(tabs.map(t => t.id));
+    for (const k of contentMapRef.current.keys()) {
+      if (!live.has(k)) contentMapRef.current.delete(k);
+    }
+  }, [tabs]);
+
+  const tabsRef = useRef(tabs);
+  useEffect(() => { tabsRef.current = tabs; }, [tabs]);
+
+  const activeTabIdRef = useRef(activeTabId);
+  useEffect(() => { activeTabIdRef.current = activeTabId; }, [activeTabId]);
+
+  const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
+  // activeTabRef is updated in an effect so it reflects committed renders,
+  // making it safe for Concurrent Mode. Flush paths (which use tabsRef + contentMapRef)
+  // are unobservable to render timing.
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
+  const editorRef = useRef<any>(null);
+
+  const getTabContent = useCallback((tab: Tab): string => {
+    if (tab.id === activeTabIdRef.current && editorRef.current) {
+      return editorRef.current.getHTML();
+    }
+    return contentMapRef.current.get(tab.id) ?? tab.content;
+  }, []);
+
+  const sessionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedSetTabsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushDebouncedTabs = useCallback(() => {
+    if (debouncedSetTabsTimer.current) {
+      clearTimeout(debouncedSetTabsTimer.current);
+      debouncedSetTabsTimer.current = null;
+      const currentEditor = editorRef.current;
+      const currentTabId = activeTabIdRef.current;
+      if (currentEditor && currentTabId) {
+        const safeTitle = titleFromText(currentEditor.getText());
+        const latestContent = contentMapRef.current.get(currentTabId) ?? currentEditor.getHTML();
+        setTabs(prev => prev.map(t => {
+          if (t.id === currentTabId) {
+            const isActuallyDirty = !(!t.path && currentEditor.isEmpty);
+            const titleToUse = t.path ? titleFromPath(t.path, safeTitle) : safeTitle;
+            return { ...t, content: latestContent, isDirty: isActuallyDirty, title: titleToUse };
+          }
+          return t;
+        }));
+      }
+    }
+  }, []);
+
+  useEffect(() => () => {
+    if (debouncedSetTabsTimer.current) {
+      clearTimeout(debouncedSetTabsTimer.current);
+    }
+  }, []);
+
+  const switchTab = useCallback((newId: string) => {
+    if (newId === activeTabIdRef.current) return;
+    flushDebouncedTabs();
+    setActiveTabId(newId);
+  }, [flushDebouncedTabs]);
+
+  const flushSessionSave = useCallback(() => {
+    flushDebouncedTabs();
+    if (sessionTimer.current) {
+      clearTimeout(sessionTimer.current);
+      sessionTimer.current = null;
+    }
+    try {
+      const currentTabs = tabsRef.current;
+      const payload = {
+        tabs: currentTabs.map(t => ({
+          id: t.id,
+          title: t.title,
+          path: t.path,
+          isPinned: t.isPinned,
+          isDirty: !!t.isDirty,
+          content: (t.path && !t.isDirty) ? '' : getTabContent(t),
+        })),
+        activeTabIndex: Math.max(0, currentTabs.findIndex(t => t.id === activeTabIdRef.current)),
+      };
+      localStorage.setItem('noting_session', JSON.stringify(payload));
+      localStorage.setItem('noting_active_tab_id', activeTabIdRef.current);
+    } catch (e) {
+      console.error('Failed to flush session to localStorage', e);
+    }
+  }, [getTabContent]);
+
+  useEffect(() => {
+    if (sessionTimer.current) clearTimeout(sessionTimer.current);
+    sessionTimer.current = setTimeout(flushSessionSave, 800);
+    return () => {
+      if (sessionTimer.current) clearTimeout(sessionTimer.current);
+    };
+  }, [tabs, flushSessionSave]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlistenFn: (() => void) | null = null;
+    appWindow.onFocusChanged(({ payload: focused }) => {
+      if (focused) return;
+
+      // 1. Session buffer flush FIRST (crash-safe)
+      flushSessionSave();
+
+      // 2. Auto-save ALL dirty path-tabs to disk
+      const dirtyPathTabs = tabsRef.current.filter(t => t.isDirty && t.path);
+      if (dirtyPathTabs.length === 0) return;
+
+      const writes = dirtyPathTabs.map(tab => {
+        const html = getTabContent(tab);
+        return writeTextFile(tab.path!, getMarkdown(html))
+          .then(() => ({ tab, ok: true as const }))
+          .catch(err => ({ tab, ok: false as const, err }));
+      });
+
+      Promise.allSettled(writes).then(results => {
+        const succeededIds = results
+          .filter(r => r.status === 'fulfilled' && r.value.ok)
+          .map(r => (r as PromiseFulfilledResult<{ tab: Tab; ok: true }>).value.tab.id);
+        if (succeededIds.length > 0) {
+          setTabs(prev => prev.map(t =>
+            succeededIds.includes(t.id) ? { ...t, isDirty: false } : t
+          ));
+        }
+      });
+    }).then(fn => {
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlistenFn = fn;
+    });
+
+    return () => {
+      cancelled = true;
+      unlistenFn?.();
+    };
+  }, [appWindow, flushSessionSave, getTabContent]);
+
   const tabsWrapperRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
@@ -436,30 +668,56 @@ function App() {
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
   const [tabToClose, setTabToClose] = useState<string | null>(null);
   const [showQuitPrompt, setShowQuitPrompt] = useState(false);
-  const [wordWrap, setWordWrap] = useState(false);
+  const [wordWrap, setWordWrap] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('noting_word_wrap');
+      return saved !== null ? JSON.parse(saved) : true;
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('noting_word_wrap', JSON.stringify(wordWrap));
+    } catch (e) {
+      console.error('Failed to save word-wrap preference', e);
+    }
+  }, [wordWrap]);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      setContextMenu(null);
+      setTabContextMenu(null);
+    };
+    window.addEventListener('scroll', handleScroll, true);
+    return () => window.removeEventListener('scroll', handleScroll, true);
+  }, []);
+
   const [showSearch, setShowSearch] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [zoomLevel, setZoomLevel] = useState(100);
   const [showGoToLine, setShowGoToLine] = useState(false);
   const [lineNumber, setLineNumber] = useState('');
-  const [contextMenu, setContextMenu] = useState<{ x: number, y: number } | null>(null);
-  const [tabContextMenu, setTabContextMenu] = useState<{ x: number, y: number, tabId: string } | null>(null);
+  const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null);
+  const [tabContextMenu, setTabContextMenu] = useState<TabContextMenuPos | null>(null);
   const [activeFormats, setActiveFormats] = useState({ bold: false, italic: false });
   const [showMinimap, setShowMinimap] = useState<boolean>(() => {
-    const saved = localStorage.getItem('noting_show_minimap');
-    return saved !== null ? JSON.parse(saved) : false; 
+    try {
+      const saved = localStorage.getItem('noting_show_minimap');
+      return saved !== null ? JSON.parse(saved) : false;
+    } catch {
+      try { localStorage.removeItem('noting_show_minimap'); } catch {}
+      return false;
+    }
   });
 
-  const [currentTime, setCurrentTime] = useState(new Date());
-
   useEffect(() => {
-    // Updates the clock every 1000 milliseconds (1 second)
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    localStorage.setItem('noting_show_minimap', JSON.stringify(showMinimap));
+    try {
+      localStorage.setItem('noting_show_minimap', JSON.stringify(showMinimap));
+    } catch (e) {
+      console.error('Failed to save minimap preference to localStorage', e);
+    }
   }, [showMinimap]);
   const minimapContentRef = useRef<HTMLDivElement>(null);
   const minimapViewportRef = useRef<HTMLDivElement>(null);
@@ -482,8 +740,10 @@ function App() {
     let timeoutId: ReturnType<typeof setTimeout>;
     const triggerNextAnimation = () => {
       setAnimMode(prev => {
-        let next;
-        do { next = Math.floor(Math.random() * 6) + 1; } while (next === prev);
+        let next = Math.floor(Math.random() * 6) + 1;
+        if (next === prev) {
+          next = (prev % 6) + 1;
+        }
         return next;
       });
       timeoutId = setTimeout(triggerNextAnimation, Math.random() * 2000 + 3000);
@@ -505,7 +765,33 @@ function App() {
   }, [animMode]);
 
   useEffect(() => {
+    // animState.current is the source of truth for the current mode.
+    // The separate [animMode] effect owns writes to prevMode/mode/transitionStart.
+    // This loop only reads — do NOT add animMode to the dep array; that would
+    // tear down and rebuild the loop on every auto-DJ cycle for no gain.
+    if (!isAnimating) {
+      const resting = [
+        { x: 0, y: -4, c: [82, 82, 91] },
+        { x: -5, y: 4, c: [82, 82, 91] },
+        { x: 5, y: 4, c: [82, 82, 91] }
+      ];
+      const dots = [dot1Ref.current, dot2Ref.current, dot3Ref.current];
+      dots.forEach((dot, i) => {
+        if (!dot) return;
+        dot.style.transform = `translate3d(${resting[i].x}px, ${resting[i].y}px, 0)`;
+        dot.style.backgroundColor = `rgb(${resting[i].c[0]},${resting[i].c[1]},${resting[i].c[2]})`;
+      });
+      isAnimRunningRef.current = false;
+      return;
+    }
+
     let reqId: number | null = null;
+    const lastStyles = [
+      { transform: '', bg: '' },
+      { transform: '', bg: '' },
+      { transform: '', bg: '' }
+    ];
+
     const render = (time: number) => {
       const t = time / 1000;
       const { mode, prevMode, transitionStart } = animState.current;
@@ -572,26 +858,44 @@ function App() {
         }
       };
 
-      // Get where the dots WOULD be on the old path, and where they SHOULD be on the new path
-      const prevPos = getPos(prevMode, t);
+      // If transition complete (progress >= 1), skip calculating prevPos
       const currPos = getPos(mode, t);
+      const prevPos = progress >= 1 ? currPos : getPos(prevMode, t);
       const dots = [dot1Ref.current, dot2Ref.current, dot3Ref.current];
 
       dots.forEach((dot, i) => {
         if (!dot) return;
-        // Mathematically blend their positions together over time
-        const x = prevPos[i].x + (currPos[i].x - prevPos[i].x) * ease;
-        const y = prevPos[i].y + (currPos[i].y - prevPos[i].y) * ease;
-        const r = Math.round(prevPos[i].c[0] + (currPos[i].c[0] - prevPos[i].c[0]) * ease);
-        const g = Math.round(prevPos[i].c[1] + (currPos[i].c[1] - prevPos[i].c[1]) * ease);
-        const b = Math.round(prevPos[i].c[2] + (currPos[i].c[2] - prevPos[i].c[2]) * ease);
+        let x: number, y: number, r: number, g: number, b: number;
+        if (progress >= 1) {
+          x = currPos[i].x;
+          y = currPos[i].y;
+          r = currPos[i].c[0];
+          g = currPos[i].c[1];
+          b = currPos[i].c[2];
+        } else {
+          x = prevPos[i].x + (currPos[i].x - prevPos[i].x) * ease;
+          y = prevPos[i].y + (currPos[i].y - prevPos[i].y) * ease;
+          r = Math.round(prevPos[i].c[0] + (currPos[i].c[0] - prevPos[i].c[0]) * ease);
+          g = Math.round(prevPos[i].c[1] + (currPos[i].c[1] - prevPos[i].c[1]) * ease);
+          b = Math.round(prevPos[i].c[2] + (currPos[i].c[2] - prevPos[i].c[2]) * ease);
+        }
 
-        dot.style.transform = `translate(${x}px, ${y}px)`;
-        dot.style.backgroundColor = `rgb(${r},${g},${b})`;
+        const transform = `translate3d(${x}px, ${y}px, 0)`;
+        const bg = `rgb(${r},${g},${b})`;
+
+        if (lastStyles[i].transform !== transform) {
+          dot.style.transform = transform;
+          lastStyles[i].transform = transform;
+        }
+        if (lastStyles[i].bg !== bg) {
+          dot.style.backgroundColor = bg;
+          lastStyles[i].bg = bg;
+        }
       });
 
       // Pause loop only when resting at mode 0 and transition is fully complete
-      if (mode === 0 && prevMode === 0 && progress >= 1) {
+      if (mode === 0 && progress >= 1) {
+        animState.current.prevMode = 0;
         isAnimRunningRef.current = false;
         reqId = null;
         return;
@@ -614,19 +918,12 @@ function App() {
       if (reqId !== null) cancelAnimationFrame(reqId);
       isAnimRunningRef.current = false;
     };
-  }, []);
+  }, [isAnimating]);
 
   const isProgrammaticChangeRef = useRef(false);
 
-  // 2. THE REF
-  const activeTabIdRef = useRef(activeTabId);
-  useEffect(() => {
-    activeTabIdRef.current = activeTabId;
-  }, [activeTabId]); 
-
   const searchInputRef = useRef<HTMLInputElement>(null);
   const findBoxRef = useRef<HTMLDivElement>(null);
-  const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
 
   // Update the global dirty check (around line 105)
   const hasDirtyTabsRef = useRef(false);
@@ -634,22 +931,19 @@ function App() {
     hasDirtyTabsRef.current = tabs.some(t => {
       if (!t.isDirty) return false;
       // If it's dirty but it's a completely untouched new file, safely ignore it
-      if (!t.path && (t.content === '<p></p>' || t.content === '')) return false;
+      if (isEmptyUntitledTab(t, editorRef.current, activeTabIdRef.current)) return false;
       return true;
     });
   }, [tabs]);
 
   // 2. THE STRICT-MODE SAFE INTERCEPTOR
   useEffect(() => {
-    // 1. Kill any existing ghost listeners from Strict Mode immediately
-    if (globalUnlisten) {
-      globalUnlisten();
-      globalUnlisten = null;
-    }
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
 
-    // 2. Attach the one true listener
     appWindow.onCloseRequested((event) => {
-      if (isForceClosing) return; // OVERRIDE: Obey the kill switch!
+      flushSessionSave(); // flush first, unconditionally
+      if (isForceClosingRef.current) return;
 
       if (hasDirtyTabsRef.current) {
         event.preventDefault(); // Stop the native OS close
@@ -661,17 +955,19 @@ function App() {
         
         setShowQuitPrompt(true); 
       }
-    }).then(unlisten => {
-      globalUnlisten = unlisten; // Save it to the global variable
+    }).then(fn => {
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
     });
 
     return () => {
-      if (globalUnlisten) {
-        globalUnlisten();
-        globalUnlisten = null;
-      }
+      cancelled = true;
+      unlisten?.();
     };
-  }, []);
+  }, [flushSessionSave, appWindow]);
 
   /* --- FEATURE: SESSION RESTORE & RECENT FILES ON BOOT --- */
   useEffect(() => {
@@ -679,7 +975,12 @@ function App() {
       // Load recent files
       const savedRecents = localStorage.getItem('noting_recents');
       if (savedRecents) {
-        try { setRecentFiles(JSON.parse(savedRecents)); } catch (e) {}
+        try {
+          const parsed = JSON.parse(savedRecents);
+          if (Array.isArray(parsed)) setRecentFiles(parsed);
+        } catch (e) {
+          try { localStorage.removeItem('noting_recents'); } catch {}
+        }
       }
 
       const savedActiveId = localStorage.getItem('noting_active_tab_id');
@@ -688,56 +989,69 @@ function App() {
       if (savedSession) {
         try {
           const parsedSession = JSON.parse(savedSession);
-          if (parsedSession.length > 0) {
+          const sessionList = Array.isArray(parsedSession) ? parsedSession : (parsedSession?.tabs ?? []);
+          if (sessionList.length > 0) {
             const restoredTabs: Tab[] = [];
-            for (const item of parsedSession) {
+            for (const item of sessionList) {
+              const tabId = (item.id && typeof item.id === 'string') ? item.id : createTabId();
               if (item.path) {
-                try {
-                  if (item.isDirty && item.content) {
-                    restoredTabs.push({
-                      id: createTabId(),
-                      title: item.title,
-                      content: item.content,
-                      path: item.path,
-                      isDirty: true,
-                      isPinned: item.isPinned
-                    });
-                  } else {
+                if (item.isDirty && item.content) {
+                  // User's unsaved edits — do NOT read from disk
+                  restoredTabs.push({
+                    id: tabId,
+                    title: item.title || 'Untitled',
+                    content: DOMPurify.sanitize(item.content, PURIFY_CONFIG), // defence in depth
+                    path: item.path,
+                    isDirty: true,
+                    isPinned: item.isPinned,
+                  });
+                } else {
+                  try {
                     const rawText = await readTextFile(item.path);
                     const content = await parseFileContent(rawText);
                     restoredTabs.push({
-                      id: createTabId(),
+                      id: tabId,
                       title: item.title,
                       content,
                       path: item.path,
                       isDirty: false,
-                      isPinned: item.isPinned
+                      isPinned: item.isPinned,
                     });
-                  }
-                } catch (e) {
-                  // File deleted or moved — restore as unsaved tab if it had content or was pinned
-                  if (item.content || item.isPinned) {
-                    restoredTabs.push({
-                      id: createTabId(),
-                      title: item.title || 'Untitled',
-                      content: item.content || '',
-                      isDirty: true,
-                      isPinned: item.isPinned
-                    });
+                  } catch (e) {
+                    // File gone. If we have saved dirty content, preserve it.
+                    if (item.content) {
+                      restoredTabs.push({
+                        id: tabId,
+                        title: item.title || 'Untitled',
+                        content: DOMPurify.sanitize(item.content, PURIFY_CONFIG),
+                        path: item.path,
+                        isDirty: true,
+                        isPinned: item.isPinned,
+                      });
+                    }
                   }
                 }
-              } else if (item.isPinned || item.content || item.title) {
-                restoredTabs.push({ ...item, id: createTabId() }); 
+              } else if (item.isPinned || item.content) {
+                restoredTabs.push({
+                  id: tabId,
+                  title: item.title || 'Untitled',
+                  content: item.content ? DOMPurify.sanitize(item.content, PURIFY_CONFIG) : '',
+                  isDirty: !!item.isDirty,
+                  isPinned: item.isPinned,
+                });
               }
             }
             if (restoredTabs.length > 0) {
               restoredTabs.sort((a, b) => (a.isPinned === b.isPinned) ? 0 : a.isPinned ? -1 : 1);
               setTabs(restoredTabs);
-              const targetActiveId = restoredTabs.find(t => t.id === savedActiveId) ? savedActiveId : restoredTabs[0].id;
-              setActiveTabId(targetActiveId || restoredTabs[0].id);
+              const savedActiveIndex = Array.isArray(parsedSession) ? 0 : (parsedSession?.activeTabIndex ?? 0);
+              const targetActiveId = restoredTabs.find(t => t.id === savedActiveId)?.id
+                ?? restoredTabs[Math.min(savedActiveIndex, restoredTabs.length - 1)].id;
+              setActiveTabId(targetActiveId);
             }
           }
         } catch (e) {
+          try { localStorage.removeItem('noting_session'); } catch {}
           console.error('Failed to parse session state', e);
         }
       }
@@ -745,51 +1059,14 @@ function App() {
     bootSession();
   }, []);
 
-  /* --- FEATURE: SAVE SESSION TO LOCAL STORAGE ON TAB CHANGE --- */
-  useEffect(() => {
-    const saveSession = () => {
-      const sessionData = tabs.map(t => ({ 
-        title: t.title, 
-        path: t.path, 
-        isPinned: t.isPinned,
-        isDirty: t.isDirty,
-        content: t.content
-      }));
-
-      try {
-        localStorage.setItem('noting_session', JSON.stringify(sessionData));
-        localStorage.setItem('noting_active_tab_id', activeTabId);
-      } catch (e) {
-        // Fallback for LocalStorage QuotaExceededError
-        try {
-          const lightweightSession = tabs.map(t => ({
-            title: t.title,
-            path: t.path,
-            isPinned: t.isPinned,
-            isDirty: t.isDirty,
-            content: t.id === activeTabId || !t.path ? t.content : ''
-          }));
-          localStorage.setItem('noting_session', JSON.stringify(lightweightSession));
-          localStorage.setItem('noting_active_tab_id', activeTabId);
-        } catch (err) {
-          console.error('Failed to save session state to localStorage', err);
-        }
-      }
-    };
-
-    const timer = setTimeout(saveSession, 300);
-    return () => clearTimeout(timer);
-  }, [tabs, activeTabId]);
-
-  const forceCloseApp = () => {
-    isForceClosing = true; 
-    if (globalUnlisten) {
-      globalUnlisten(); 
-      globalUnlisten = null;
-    }
-    hasDirtyTabsRef.current = false;
+  const forceCloseApp = useCallback(() => {
+    flushSessionSave(); // belt: onCloseRequested's flush is suspenders.
+    // Redundancy is intentional — forceCloseApp covers paths where
+    // onCloseRequested is bypassed; onCloseRequested covers OS close-button
+    // paths where forceCloseApp isn't the entry point.
+    isForceClosingRef.current = true;
     appWindow.close();
-  };
+  }, [flushSessionSave, appWindow]);
 
   const caretFrameRef = useRef<number | null>(null);
 
@@ -829,7 +1106,7 @@ function App() {
       MathEngine,
       StarterKit.configure({ italic: false }),
       CustomItalic,
-      Placeholder.configure({ placeholder: 'Write yo shi twin' }), 
+      Placeholder.configure({ placeholder: 'Start writing...' }), 
       CharacterCount,
       SearchAndReplace.configure({ searchResultClass: 'search-match' })
     ],
@@ -839,8 +1116,10 @@ function App() {
     onCreate({ editor }) {
       updatePlaceholderVisibility(editor);
     },
-    onTransaction({ editor }) {
-      updatePlaceholderVisibility(editor);
+    onTransaction({ editor, transaction }) {
+      if (transaction.docChanged) {
+        updatePlaceholderVisibility(editor);
+      }
 
       setActiveFormats(prev => {
         const isBold = editor.isActive('bold');
@@ -852,54 +1131,51 @@ function App() {
     },
     onUpdate({ editor, transaction }) {
       const newContent = editor.getHTML();
+      const currentTabId = activeTabIdRef.current;
+      contentMapRef.current.set(currentTabId, newContent);
       setWords(editor.storage.characterCount.words());
       setChars(editor.storage.characterCount.characters());
       
       if (transaction.docChanged && editor.isFocused) {
         if (isProgrammaticChangeRef.current) return;
 
-        const safeTitle = titleFromText(editor.getText());
-
-        setTabs(prev => prev.map(t => {
-          if (t.id === activeTabIdRef.current) {
-            const isActuallyDirty = !(!t.path && editor.isEmpty);
-            const titleToUse = t.path 
-              ? titleFromPath(t.path, safeTitle)
-              : safeTitle;
-            return { ...t, content: newContent, isDirty: isActuallyDirty, title: titleToUse };
-          }
-          return t;
-        }));
-
         keepCaretAwayFromRightEdge();
+
+        if (debouncedSetTabsTimer.current) {
+          clearTimeout(debouncedSetTabsTimer.current);
+        }
+
+        debouncedSetTabsTimer.current = setTimeout(() => {
+          debouncedSetTabsTimer.current = null;
+          const currentEditor = editorRef.current;
+          if (!currentEditor) return;
+          const safeTitle = titleFromText(currentEditor.getText());
+          const latestContent = contentMapRef.current.get(currentTabId) ?? newContent;
+
+          setTabs(prev => prev.map(t => {
+            if (t.id === currentTabId) {
+              const isActuallyDirty = !(!t.path && currentEditor.isEmpty);
+              const titleToUse = t.path 
+                ? titleFromPath(t.path, safeTitle)
+                : safeTitle;
+              return { ...t, content: latestContent, isDirty: isActuallyDirty, title: titleToUse };
+            }
+            return t;
+          }));
+        }, 250);
       }
     },
     // This tracks the cursor position!
     onSelectionUpdate({ editor }) {
-      const { selection } = editor.state;
-      const { from, to } = selection;
-      
-      let currentLine = 0;
-      let lastLineStartPos = 0;
+      const { $head, from, to } = editor.state.selection;
 
-      // Scan from the top of the document down to the cursor
-      editor.state.doc.nodesBetween(0, from, (node, pos) => {
-        if (node.isTextblock) {
-          currentLine++;
-          // Marks the starting position of this paragraph/list item
-          lastLineStartPos = pos + 1; 
-        } else if (node.type.name === 'hardBreak') {
-          currentLine++;
-          // Marks the starting position right after the Shift+Enter
-          lastLineStartPos = pos + 1; 
-        }
-      });
+      // Line = top-level block index. O(1). A list counts as one block.
+      // Top-level block counting matches Go To Line block semantics and avoids
+      // an O(n) document walk per keystroke.
+      const line = $head.index(0) + 1;
+      const col = $head.parentOffset + 1;
 
-      setCursorPos({
-        line: currentLine || 1,
-        // Column is simply the cursor's distance from the start of the current line!
-        col: Math.max(1, from - lastLineStartPos + 1)
-      });
+      setCursorPos(prev => (prev.line === line && prev.col === col ? prev : { line, col }));
 
       // Selection word count logic
       if (from !== to) {
@@ -912,7 +1188,11 @@ function App() {
 
       keepCaretAwayFromRightEdge();
     }
-    });
+  });
+
+  useEffect(() => {
+    editorRef.current = editor;
+  }, [editor]);
 
   useEffect(() => {
     if (showSearch) {
@@ -975,30 +1255,7 @@ function App() {
     return () => resizeObserver.disconnect();
   }, [showMinimap, wordWrap, zoomLevel, editor]);
 
-  /* --- FEATURE: AUTO-SAVE (Save when app loses focus) --- */
-  useEffect(() => {
-    const handleAppBlur = async () => {
-      const dirtyFileTabs = tabs.filter(t => t.isDirty && t.path);
-      if (dirtyFileTabs.length === 0) return;
-
-      for (const tab of dirtyFileTabs) {
-        try {
-          const htmlToSave = tab.id === activeTabId && editor ? editor.getHTML() : tab.content;
-          const markdown = getMarkdown(htmlToSave);
-          await writeTextFile(tab.path!, markdown);
-        } catch (e) {
-          console.error(`Auto-save on blur failed for ${tab.title}`, e);
-        }
-      }
-
-      setTabs(prev => prev.map(t => (t.isDirty && t.path ? { ...t, isDirty: false } : t)));
-    };
-
-    window.addEventListener('blur', handleAppBlur);
-    return () => window.removeEventListener('blur', handleAppBlur);
-  }, [tabs, activeTabId, editor]);
-
-  const addTab = (title = 'Untitled', content = '', path?: string) => {
+  const addTab = useCallback((title = 'Untitled', content = '', path?: string) => {
     const newId = createTabId();
     setTabs(prev => [...prev, { id: newId, title, content, path, isDirty: false }]);
     setActiveTabId(newId);
@@ -1006,16 +1263,16 @@ function App() {
       document.querySelector('.add-tab-container')?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
       checkTabScroll();
     }, 50);
-  };
+  }, []);
 
   /* --- TOGGLE PIN STATUS --- */
-  const togglePin = (id: string) => {
+  const togglePin = useCallback((id: string) => {
     setTabs(prev => {
       const next = prev.map(t => t.id === id ? { ...t, isPinned: !t.isPinned } : t);
       // Automatically sorts tabs so pinned ones stay safely on the left!
       return next.sort((a, b) => (a.isPinned === b.isPinned) ? 0 : a.isPinned ? -1 : 1);
     });
-  };
+  }, []);
 
   /* --- TAB DRAG (mouse-based, works in Tauri) --- */
   const handleTabMouseDown = (e: React.MouseEvent, id: string) => {
@@ -1023,7 +1280,7 @@ function App() {
     // Don't start a drag if they clicked the × button
     if ((e.target as HTMLElement).classList.contains('tab-close')) return;
     e.preventDefault();
-    setActiveTabId(id);
+    switchTab(id);
     setDraggedTabId(id);
   };
 
@@ -1057,13 +1314,31 @@ function App() {
   }, [draggedTabId, dragOverTabId]);
 
   /* --- 1. TAB & APP CLOSING --- */
-  // Update the tab close function (around line 275)
-  const requestCloseTab = (e: React.MouseEvent, id: string) => {
+  const executeCloseTab = useCallback((id: string) => {
+    flushDebouncedTabs();
+    setTabs(prev => {
+      if (prev.length <= 1) {
+        const newId = createTabId();
+        setActiveTabId(newId);
+        return [{ id: newId, title: 'Untitled', content: '', isDirty: false }];
+      }
+      const closedIndex = prev.findIndex(t => t.id === id);
+      const nextTabs = prev.filter(t => t.id !== id);
+      if (activeTabIdRef.current === id) {
+        const nextIndex = Math.min(closedIndex, nextTabs.length - 1);
+        setActiveTabId(nextTabs[Math.max(0, nextIndex)].id);
+      }
+      return nextTabs;
+    });
+    setTabToClose(null); 
+  }, [flushDebouncedTabs]);
+
+  const requestCloseTab = useCallback((e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    const tab = tabs.find(t => t.id === id);
+    const tab = tabsRef.current.find(t => t.id === id);
     
     if (tab?.isDirty) {
-      const isEmptyNewFile = isEmptyUntitledTab(tab);
+      const isEmptyNewFile = isEmptyUntitledTab(tab, editorRef.current, activeTabIdRef.current);
       if (isEmptyNewFile) {
         executeCloseTab(id); // Safe to close empty, unsaved tabs
       } else {
@@ -1072,27 +1347,7 @@ function App() {
     } else {
       executeCloseTab(id);
     }
-  };
-
-  const executeCloseTab = (id: string) => {
-    if (tabs.length === 1) {
-      const newId = createTabId();
-      const freshTab: Tab = { id: newId, title: 'Untitled', content: '', isDirty: false };
-      setTabs([freshTab]);
-      setActiveTabId(newId);
-      setTabToClose(null);
-      return;
-    }
-    const closedIndex = tabs.findIndex(t => t.id === id);
-    const newTabs = tabs.filter(t => t.id !== id);
-    setTabs(newTabs);
-
-    if (activeTabId === id) {
-      const nextIndex = Math.min(closedIndex, newTabs.length - 1);
-      setActiveTabId(newTabs[Math.max(0, nextIndex)].id);
-    }
-    setTabToClose(null); 
-  };
+  }, [executeCloseTab]);
 
   const requestAppClose = () => {
     if (hasDirtyTabsRef.current) {
@@ -1102,18 +1357,22 @@ function App() {
     }
   };
 
-  const addToRecentFiles = (path: string) => {
+  const addToRecentFiles = useCallback((path: string) => {
     setRecentFiles(prev => {
       const updated = [path, ...prev.filter(p => p !== path)].slice(0, 10);
-      localStorage.setItem('noting_recents', JSON.stringify(updated));
+      try {
+        localStorage.setItem('noting_recents', JSON.stringify(updated));
+      } catch (e) {
+        console.error('Failed to save recents to localStorage', e);
+      }
       return updated;
     });
-  };
+  }, []);
 
-  const openFileInTab = async (path: string): Promise<boolean> => {
-    const existingTab = tabs.find(t => t.path === path);
+  const openFileInTab = useCallback(async (path: string): Promise<boolean> => {
+    const existingTab = tabsRef.current.find(t => t.path === path);
     if (existingTab) {
-      setActiveTabId(existingTab.id);
+      switchTab(existingTab.id);
       addToRecentFiles(path);
       return true;
     }
@@ -1123,14 +1382,15 @@ function App() {
       const htmlContent = await parseFileContent(rawText);
       const fileName = titleFromPath(path);
 
-      if (isBlankUnsavedTab(activeTab)) {
+      if (isBlankUnsavedTab(activeTabRef.current, editorRef.current, activeTabIdRef.current)) {
+        const currentActiveId = activeTabIdRef.current;
         setTabs(prev => prev.map(t =>
-          t.id === activeTabId
+          t.id === currentActiveId
             ? { ...t, title: fileName, content: htmlContent, path, isDirty: false }
             : t
         ));
         isProgrammaticChangeRef.current = true;
-        editor?.commands.setContent(htmlContent);
+        editorRef.current?.commands.setContent(htmlContent);
         isProgrammaticChangeRef.current = false;
       } else {
         addTab(fileName, htmlContent, path);
@@ -1139,101 +1399,127 @@ function App() {
       addToRecentFiles(path);
       return true;
     } catch (e) {
-      alert("Could not open file. It may have been moved, deleted, or permission was denied.");
+      console.error('Could not open file:', e);
+      showToast("Could not open file. It may have been moved, deleted, or permission was denied.", "error");
       setRecentFiles(prev => prev.filter(p => p !== path));
       return false;
     }
-  };
+  }, [addTab, addToRecentFiles, showToast, switchTab]);
 
-  const handleOpen = async () => {
-    const selected = await open({ 
-      multiple: false, 
-      filters: [{ name: 'Text', extensions: ['txt', 'md'] }] 
-    });
-    if (selected && typeof selected === 'string') {
-      await openFileInTab(selected);
+  const handleOpen = useCallback(async () => {
+    try {
+      const selected = await open({ 
+        multiple: false, 
+        filters: [{ name: 'Text', extensions: ['txt', 'md'] }] 
+      });
+      if (selected && typeof selected === 'string') {
+        await openFileInTab(selected);
+      }
+    } catch (e) {
+      console.error('Error opening file dialog:', e);
+      showToast('Could not open file.', 'error');
     }
-  };
+  }, [openFileInTab, showToast]);
 
-  const handleSaveFromModal = async () => {
-    if (!tabToClose) return;
-    const tab = tabs.find(t => t.id === tabToClose);
+  const handleSaveFromModal = useCallback(async () => {
+    if (!editorRef.current || !tabToClose) return;
+    const tab = tabsRef.current.find(t => t.id === tabToClose);
     if (!tab) return;
     const suggestedName = suggestedFileName(tab.title);
-    const path = tab.path || await save({
-      defaultPath: suggestedName,
-      filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
-    });
-    if (path) {
-      await writeTextFile(path, getMarkdown(tab.content));
-      executeCloseTab(tabToClose);
-      addToRecentFiles(path);
-    } else {
+    try {
+      const path = tab.path || await save({
+        defaultPath: suggestedName,
+        filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
+      });
+      if (path) {
+        const htmlToSave = tab.id === activeTabIdRef.current ? editorRef.current.getHTML() : tab.content;
+        await writeTextFile(path, getMarkdown(htmlToSave));
+        executeCloseTab(tabToClose);
+        addToRecentFiles(path);
+      } else {
+        setTabToClose(null);
+      }
+    } catch (e) {
+      console.error('Save from modal failed:', e);
+      showToast('Failed to save file.', 'error');
       setTabToClose(null);
     }
-  };
+  }, [tabToClose, executeCloseTab, addToRecentFiles, showToast]);
 
-  const getMarkdown = (html: string): string => {
-    return turndownService.turndown(html);
-  };
-
-  const handleSave = async () => {
-    const suggestedName = suggestedFileName(activeTab.title);
-    const path = activeTab.path || await save({
-      defaultPath: suggestedName,
-      filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
-    });
-    if (path) {
-      await writeTextFile(path, getMarkdown(editor?.getHTML() || ''));
-      const fileName = titleFromPath(path, suggestedName);
-      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, path, title: fileName, isDirty: false } : t));
-      addToRecentFiles(path);
+  const handleSave = useCallback(async () => {
+    flushDebouncedTabs();
+    if (!editorRef.current) return;
+    const currentTab = activeTabRef.current;
+    const suggestedName = suggestedFileName(currentTab.title);
+    try {
+      const path = currentTab.path || await save({
+        defaultPath: suggestedName,
+        filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
+      });
+      if (path) {
+        await writeTextFile(path, getMarkdown(editorRef.current.getHTML()));
+        const fileName = titleFromPath(path, suggestedName);
+        const currentId = activeTabIdRef.current;
+        setTabs(prev => prev.map(t => t.id === currentId ? { ...t, path, title: fileName, isDirty: false } : t));
+        addToRecentFiles(path);
+      }
+    } catch (e) {
+      console.error('Save failed:', e);
+      showToast('Failed to save file.', 'error');
     }
-  };
+  }, [addToRecentFiles, showToast, flushDebouncedTabs]);
 
-  const handleSaveAs = async () => {
-    const suggestedName = suggestedFileName(activeTab.title);
-    const path = await save({
-      defaultPath: suggestedName,
-      filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
-    });
-    if (path) {
-      await writeTextFile(path, getMarkdown(editor?.getHTML() || ''));
-      const fileName = titleFromPath(path, suggestedName);
-      setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, path, title: fileName, isDirty: false } : t));
-      addToRecentFiles(path);
+  const handleSaveAs = useCallback(async () => {
+    flushDebouncedTabs();
+    if (!editorRef.current) return;
+    const currentTab = activeTabRef.current;
+    const suggestedName = suggestedFileName(currentTab.title);
+    try {
+      const path = await save({
+        defaultPath: suggestedName,
+        filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
+      });
+      if (path) {
+        await writeTextFile(path, getMarkdown(editorRef.current.getHTML()));
+        const fileName = titleFromPath(path, suggestedName);
+        const currentId = activeTabIdRef.current;
+        setTabs(prev => prev.map(t => t.id === currentId ? { ...t, path, title: fileName, isDirty: false } : t));
+        addToRecentFiles(path);
+      }
+    } catch (e) {
+      console.error('Save As failed:', e);
+      showToast('Failed to save file.', 'error');
     }
-  };
+  }, [addToRecentFiles, showToast, flushDebouncedTabs]);
 
 
 
   const executeGoToLine = () => {
     const line = parseInt(lineNumber);
-    if (editor && !isNaN(line) && line > 0) {
-      editor.commands.focus();
-      let currentLine = 1;
-      let targetPos = 0;
-      let found = false;
+    if (!editor || isNaN(line) || line < 1) {
+      setShowGoToLine(false);
+      setLineNumber('');
+      return;
+    }
+    const target = line - 1;
 
-      editor.state.doc.descendants((node, pos) => {
-        if (found) return false;
-        // Only count actual paragraphs/blocks that contain text or are empty lines
-        if (node.type.isBlock) {
-          if (currentLine === line) {
-            targetPos = pos;
-            found = true;
-            return false;
-          }
-          currentLine++;
-        }
-      });
+    let targetPos: number | null = null;
+    editor.state.doc.forEach((_node, offset, index) => {
+      if (index === target && targetPos === null) targetPos = offset;
+    });
 
-      if (found) {
-        // Jump to the start of that line (+1 enters the node)
-        editor.commands.setTextSelection(targetPos + 1);
-        editor.commands.scrollIntoView();
+    if (targetPos !== null) {
+      // doc.forEach walks top-level blocks. Find a text position *inside* the block.
+      // For a container like bulletList, offset+1 is the container boundary (an invalid
+      // textSelection endpoint that throws RangeError). findFrom walks forward into
+      // the first listItem > paragraph; Selection.near($pos) is the fallback.
+      const $pos = editor.state.doc.resolve(targetPos);
+      const sel = Selection.findFrom($pos, 1, true) || Selection.near($pos);
+      if (sel) {
+        editor.view.dispatch(editor.state.tr.setSelection(sel).scrollIntoView());
       }
     }
+
     setShowGoToLine(false);
     setLineNumber('');
   };
@@ -1281,7 +1567,7 @@ function App() {
         const nextIndex = e.shiftKey
           ? (currentIndex - 1 + tabs.length) % tabs.length
           : (currentIndex + 1) % tabs.length;
-        setActiveTabId(tabs[nextIndex].id);
+        switchTab(tabs[nextIndex].id);
       } else if (e.ctrlKey && e.key === 'f') {
         e.preventDefault(); 
         setShowSearch(true);
@@ -1355,7 +1641,20 @@ function App() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('wheel', handleWheel);
     };
-  }, [activeTab, tabs, editor, showSearch, searchTerm]);
+  }, [
+    activeTab,
+    tabs,
+    activeTabId,
+    editor,
+    showSearch,
+    searchTerm,
+    draggedTabId,
+    handleSave,
+    handleOpen,
+    addTab,
+    requestCloseTab,
+    switchTab,
+  ]);
 
   /* --- 2. CONTEXT MENU LISTENER --- */
   useEffect(() => {
@@ -1479,15 +1778,23 @@ function App() {
       editorElem.scrollTop = targetPercent * scrollableEditor;
     };
 
+    if (dragRef.current) {
+      window.removeEventListener('mousemove', dragRef.current.onMove);
+      window.removeEventListener('mouseup', dragRef.current.onUp);
+      dragRef.current = null;
+    }
+
     if (minimapViewportRef.current) minimapViewportRef.current.classList.add('is-dragging');
 
     const onMouseMove = (moveEvent: MouseEvent) => updateScroll(moveEvent.clientY);
     const onMouseUp = () => {
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
+      dragRef.current = null;
       if (minimapViewportRef.current) minimapViewportRef.current.classList.remove('is-dragging');
     };
 
+    dragRef.current = { onMove: onMouseMove, onUp: onMouseUp };
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
   };
@@ -1510,471 +1817,238 @@ function App() {
     handleEditorScroll();
   }, [activeTab.content, zoomLevel, wordWrap, showMinimap]);
 
+  const handleScrollTabsLeft = useCallback(() => {
+    tabsWrapperRef.current?.scrollBy({ left: -180, behavior: 'smooth' });
+    setTimeout(checkTabScroll, 200);
+  }, []);
+
+  const handleScrollTabsRight = useCallback(() => {
+    tabsWrapperRef.current?.scrollBy({ left: 180, behavior: 'smooth' });
+    setTimeout(checkTabScroll, 200);
+  }, []);
+
+  const handleTabContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTabContextMenu({ x: e.clientX, y: e.clientY, tabId });
+  }, []);
+
+  const handleTabMouseLeave = useCallback(() => {
+    if (draggedTabId) setDragOverTabId(null);
+  }, [draggedTabId]);
+
+  const handleReplaceCurrent = useCallback(() => {
+    const storage = (editorRef.current?.storage as any)?.searchAndReplace;
+    const match = storage?.results?.[storage?.resultIndex];
+    if (match && editorRef.current) {
+      editorRef.current.chain().focus().insertContentAt({ from: match.from, to: match.to }, replaceTerm).run();
+      editorRef.current.chain().setSearchTerm(searchTerm).run();
+      scrollToCurrentMatch();
+    }
+  }, [searchTerm, replaceTerm]);
+
+  const handleReplaceAll = useCallback(() => {
+    if (editorRef.current) {
+      editorRef.current.chain().focus().replaceAll().run();
+      editorRef.current.chain().setSearchTerm(searchTerm).run();
+      scrollToCurrentMatch();
+    }
+  }, [searchTerm]);
+
   return (
     <div className={`app-container ${!showMinimap ? 'hide-minimap' : ''}`}>
-      
-      {/* ROW 1: TABS (0f0f15 background) */}
-      <div className="tab-bar" data-tauri-drag-region>
-        
-        {/* 1. The App Icon */}
-        <div className="titlebar-icon" data-tauri-drag-region>
-          <img 
-            src={appIcon} /* <-- CHANGED: Uses the imported variable */
-            alt="app icon" 
-            style={{ width: '16px', height: '16px', pointerEvents: 'none' }} 
-          />
-        </div>
+      <TabBar
+        tabs={tabs}
+        activeTabId={activeTabId}
+        draggedTabId={draggedTabId}
+        dragOverTabId={dragOverTabId}
+        canScrollLeft={canScrollLeft}
+        canScrollRight={canScrollRight}
+        tabsWrapperRef={tabsWrapperRef}
+        onScrollCheck={checkTabScroll}
+        onScrollLeft={handleScrollTabsLeft}
+        onScrollRight={handleScrollTabsRight}
+        onSelectTab={switchTab}
+        onTabMouseDown={handleTabMouseDown}
+        onTabMouseEnter={handleTabMouseEnter}
+        onTabMouseLeave={handleTabMouseLeave}
+        onTabContextMenu={handleTabContextMenu}
+        onCloseTab={requestCloseTab}
+        onAddTab={() => addTab()}
+        onMinimize={() => appWindow.minimize()}
+        onMaximize={() => appWindow.toggleMaximize()}
+        onCloseApp={requestAppClose}
+      />
 
-        {/* Scroll Left Button */}
-        {(canScrollLeft || canScrollRight) && (
-          <button 
-            className={`tab-scroll-btn ${!canScrollLeft ? 'disabled' : ''}`}
-            onClick={() => {
-              tabsWrapperRef.current?.scrollBy({ left: -180, behavior: 'smooth' });
-              setTimeout(checkTabScroll, 200);
-            }}
-            title="Scroll Tabs Left"
-            disabled={!canScrollLeft}
-          >
-            ‹
-          </button>
-        )}
+      <Toolbar
+        wordWrap={wordWrap}
+        showMinimap={showMinimap}
+        isBoldActive={activeFormats.bold}
+        isItalicActive={activeFormats.italic}
+        dot1Ref={dot1Ref}
+        dot2Ref={dot2Ref}
+        dot3Ref={dot3Ref}
+        onNewTab={() => addTab()}
+        onOpen={handleOpen}
+        onShowRecent={() => setShowRecentModal(true)}
+        onSave={handleSave}
+        onSaveAs={handleSaveAs}
+        onExportPdf={() => window.print()}
+        onToggleWordWrap={() => setWordWrap(prev => !prev)}
+        onToggleMinimap={() => setShowMinimap(prev => !prev)}
+        onToggleBold={() => editor?.chain().focus().toggleBold().run()}
+        onToggleItalic={() => editor?.chain().focus().toggleItalic().run()}
+        onToggleAnimation={(e) => {
+          e.stopPropagation();
+          setIsAnimating(prev => !prev);
+        }}
+      />
 
-        {/* 2. Tabs Wrapper */}
-        {/* THE CURSOR FIX: We only trigger "is-dragging" if the mouse has actually moved over another tab! */}
-        <div 
-          className={`tabs-wrapper${draggedTabId ? ' is-dragging' : ''}`}
-          ref={tabsWrapperRef}
-          data-tauri-drag-region
-          onScroll={checkTabScroll}
-          onMouseLeave={() => {
-            if (draggedTabId) setDragOverTabId(null);
-          }}
-          onWheel={(e) => {
-            if (e.deltaY !== 0) {
-              e.currentTarget.scrollLeft += e.deltaY;
-              checkTabScroll();
-            }
-          }}
-        >
-          {tabs.map(tab => (
-            <div 
-              key={tab.id} 
-              className={`tab ${tab.id === activeTabId ? 'active' : ''} ${tab.id === draggedTabId ? 'dragging' : ''} ${tab.id === dragOverTabId ? 'drag-over' : ''}`}
-              onClick={() => !draggedTabId && setActiveTabId(tab.id)}
-              onMouseDown={(e) => handleTabMouseDown(e, tab.id)}
-              onMouseEnter={() => handleTabMouseEnter(tab.id)}
-              // NEW: Right click menu trigger!
-              onContextMenu={(e) => {
-                e.preventDefault();
-                e.stopPropagation(); // Stops the global listener
-                setTabContextMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
-              }}
-            >
-              {/* Adds a tiny pin icon if the tab is pinned */}
-              <span className="tab-title">
-                {tab.isPinned ? <span style={{fontSize: '0.75rem', marginRight: '4px'}}>📌</span> : ''}
-                {tab.title}{tab.isDirty ? ' •' : ''}
-              </span>
-              <button className="tab-close" onClick={(e) => requestCloseTab(e, tab.id)}>×</button>
-            </div>
-          ))}
-          <div className="add-tab-container" data-tauri-drag-region>
-            <button className="add-tab-plus" onClick={() => addTab()} title="New Tab">+</button>
-          </div>
-        </div>
-
-        {/* Scroll Right Button */}
-        {(canScrollLeft || canScrollRight) && (
-          <button 
-            className={`tab-scroll-btn ${!canScrollRight ? 'disabled' : ''}`}
-            onClick={() => {
-              tabsWrapperRef.current?.scrollBy({ left: 180, behavior: 'smooth' });
-              setTimeout(checkTabScroll, 200);
-            }}
-            title="Scroll Tabs Right"
-            disabled={!canScrollRight}
-          >
-            ›
-          </button>
-        )}
-
-        {/* 3. Window Controls */}
-        <div className="window-controls">
-          <button className="control-btn" onClick={() => appWindow.minimize()}>—</button>
-          <button className="control-btn" onClick={() => appWindow.toggleMaximize()}>☐</button>
-          <button className="control-btn close" onClick={requestAppClose}>✕</button>
-        </div>
-      </div>
-
-      {/* ROW 2: MENU & TOOLS */}
-      <div className="titlebar" data-tauri-drag-region>
-        <div className="titlebar-left">
-          <button className="menu-btn" onClick={() => addTab()}>New</button>
-          <button className="menu-btn" onClick={handleOpen}>Open</button>
-          <button className="menu-btn" onClick={() => setShowRecentModal(true)}>Recent</button> {/* <-- NEW BUTTON */}
-          <button className="menu-btn" onClick={handleSave}>Save</button>
-          <button className="menu-btn" onClick={handleSaveAs}>Save As</button>
-          <button className="menu-btn" onClick={() => window.print()}>Export PDF</button>
-          
-          <div className="toolbar-divider"></div>
-          
-          {/* NEW: Word Wrap Toggle */}
-          <button 
-            className={`menu-btn ${wordWrap ? 'is-active' : ''}`} 
-            onClick={() => setWordWrap(!wordWrap)}
-          >
-            Wrap
-          </button>
-
-          <button 
-            className={`menu-btn ${showMinimap ? 'is-active' : ''}`} 
-            onClick={() => setShowMinimap(!showMinimap)}
-          >
-            Map
-          </button>
-
-          <div className="toolbar-divider"></div>
-
-          {/* THE FORMATTING TOOLBAR */}
-          {editor && (
-            <div className="format-group">
-              <button 
-                onClick={() => editor.chain().focus().toggleBold().run()} 
-                className={`format-btn ${activeFormats.bold ? 'is-active' : ''}`}
-                title="Bold (Ctrl+B)"
-              >
-                B
-              </button>
-              <button 
-                onClick={() => editor.chain().focus().toggleItalic().run()} 
-                className={`format-btn ${activeFormats.italic ? 'is-active' : ''}`} 
-                style={{ fontStyle: 'italic' }}
-                title="Italic (Ctrl+I)"
-              >
-                I
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* NEW: THE AUTONOMOUS FLOW STATE */}
-        <div className="titlebar-right">
-          <div 
-            className="fun-animation-btn"
-            onClick={() => setIsAnimating(!isAnimating)}
-            title="Toggle Flow State"
-          >
-            {/* The refs let our math engine control them instantly */}
-            <span className="dot" ref={dot1Ref}></span>
-            <span className="dot" ref={dot2Ref}></span>
-            <span className="dot" ref={dot3Ref}></span>
-          </div>
-        </div>
-        
-      </div>
-
-      {/* ROW 3: MAIN CONTENT (EDITOR & MINIMAP) */}
       <div className="workspace-container">
-        {showSearch && (
-          <div 
-            className="find-box replace-mode"
-            ref={findBoxRef}
-            onKeyDown={(e) => {
-              // THE FOCUS TRAP
-              if (e.key === 'Tab') {
-                // 1. Grab every single input and button inside the search box
-                const focusableElements = findBoxRef.current?.querySelectorAll<HTMLElement>('input, button');
-                if (!focusableElements || focusableElements.length === 0) return;
+        <SearchBox
+          showSearch={showSearch}
+          searchTerm={searchTerm}
+          replaceTerm={replaceTerm}
+          resultCountText={
+            (editor?.storage as any)?.searchAndReplace?.results?.length > 0
+              ? `${((editor?.storage as any)?.searchAndReplace?.resultIndex || 0) + 1} of ${(editor?.storage as any)?.searchAndReplace?.results?.length}`
+              : '0 of 0'
+          }
+          findBoxRef={findBoxRef}
+          searchInputRef={searchInputRef}
+          onSearchChange={(val) => {
+            setSearchTerm(val);
+            editor?.chain().setSearchTerm(val).run();
+            scrollToCurrentMatch();
+          }}
+          onReplaceChange={(val) => {
+            setReplaceTerm(val);
+            editor?.chain().setReplaceTerm(val).run();
+          }}
+          onPreviousMatch={() => {
+            editor?.chain().previousSearchResult().run();
+            scrollToCurrentMatch();
+          }}
+          onNextMatch={() => {
+            editor?.chain().nextSearchResult().run();
+            scrollToCurrentMatch();
+          }}
+          onReplaceCurrent={handleReplaceCurrent}
+          onReplaceAll={handleReplaceAll}
+          onClose={() => {
+            setShowSearch(false);
+            setSearchTerm('');
+            setReplaceTerm('');
+            editor?.chain().setSearchTerm('').run();
+            editor?.commands.focus();
+          }}
+          onClearTerms={() => {
+            setSearchTerm('');
+            setReplaceTerm('');
+            editor?.chain().setSearchTerm('').run();
+          }}
+        />
 
-                const firstElement = focusableElements[0];
-                const lastElement = focusableElements[focusableElements.length - 1];
-
-                // 2. If holding Shift+Tab on the first element, jump to the end!
-                if (e.shiftKey && document.activeElement === firstElement) {
-                  e.preventDefault();
-                  lastElement.focus();
-                } 
-                // 3. If holding Tab on the very last element, jump to the beginning!
-                else if (!e.shiftKey && document.activeElement === lastElement) {
-                  e.preventDefault();
-                  firstElement.focus();
-                }
-              }
-            }}
-          >
-            {/* ROW 1: FIND & NAVIGATION */}
-            <div className="find-row">
-              <input 
-                ref={searchInputRef}
-                type="text" 
-                className="find-input" 
-                placeholder="Find..." 
-                value={searchTerm}
-                onChange={(e) => {
-                  setSearchTerm(e.target.value);
-                  editor?.chain().setSearchTerm(e.target.value).run(); 
-                  scrollToCurrentMatch();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    if (e.shiftKey) editor?.chain().previousSearchResult().run();
-                    else editor?.chain().nextSearchResult().run();
-                    scrollToCurrentMatch();
-                  }
-                }}
-              />
-              <span className="find-count">
-                {(editor?.storage as any)?.searchAndReplace?.results?.length > 0 
-                  ? `${((editor?.storage as any)?.searchAndReplace?.resultIndex || 0) + 1} of ${(editor?.storage as any)?.searchAndReplace?.results?.length}`
-                  : '0 of 0'}
-              </span>
-              
-              {/* NEW THICK SVG ICONS */}
-              <button className="find-btn" onClick={() => { editor?.chain().previousSearchResult().run(); scrollToCurrentMatch(); }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
-              </button>
-              <button className="find-btn" onClick={() => { editor?.chain().nextSearchResult().run(); scrollToCurrentMatch(); }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-              </button>
-              <button className="find-btn" onClick={() => {
-                setShowSearch(false);
-                setSearchTerm('');
-                setReplaceTerm('');
-                editor?.chain().setSearchTerm('').run(); 
-                editor?.commands.focus();
-              }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-              </button>
-            </div>
-
-            {/* ROW 2: REPLACE ACTIONS */}
-            <div className="replace-row">
-              <input 
-                type="text" 
-                className="find-input" 
-                placeholder="Replace with..." 
-                value={replaceTerm}
-                onChange={(e) => {
-                  setReplaceTerm(e.target.value);
-                  editor?.chain().setReplaceTerm(e.target.value).run();
-                }}
-                // NEW: Lets you hit Enter to instantly replace the highlighted word!
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    const storage = (editor?.storage as any)?.searchAndReplace;
-                    const match = storage?.results?.[storage?.resultIndex];
-                    if (match) {
-                      editor?.chain().focus().insertContentAt({ from: match.from, to: match.to }, replaceTerm).run();
-                      editor?.chain().setSearchTerm(searchTerm).run();
-                    }
-                  }
-                }}
-              />
-              <button className="find-btn action" onClick={() => {
-                const storage = (editor?.storage as any)?.searchAndReplace;
-                const match = storage?.results?.[storage?.resultIndex];
-                if (match) {
-                  editor?.chain().focus().insertContentAt({ from: match.from, to: match.to }, replaceTerm).run();
-                  editor?.chain().setSearchTerm(searchTerm).run();
-                }
-              }}>Replace</button>
-              
-              <button className="find-btn action" onClick={() => {
-                editor?.chain().focus().replaceAll().run();
-                editor?.chain().setSearchTerm(searchTerm).run();
-              }}>All</button>
-            </div>
-          </div>
-        )}
-        <EditorContent 
-          editor={editor} 
-          className={`editor-container ${!wordWrap ? 'no-wrap' : ''}`} 
-          style={{ fontSize: `${1.0 * (zoomLevel / 100)}rem` }} 
+        <EditorPane
+          editor={editor}
+          wordWrap={wordWrap}
+          zoomLevel={zoomLevel}
           onScroll={handleEditorScroll}
         />
 
-        <div className="minimap-container" onMouseDown={handleMinimapTrackMouseDown}>
-          <div 
-            className="minimap-viewport" 
-            ref={minimapViewportRef} 
-            onMouseDown={handleMinimapMouseDown}
-          >
-            <div 
-              className="minimap-content" 
-              ref={minimapContentRef}
-              dangerouslySetInnerHTML={{ __html: activeTab.content }} 
-            />
-          </div> 
-        </div>
+        <Minimap
+          content={activeTab.content}
+          minimapViewportRef={minimapViewportRef}
+          minimapContentRef={minimapContentRef}
+          onTrackMouseDown={handleMinimapTrackMouseDown}
+          onViewportMouseDown={handleMinimapMouseDown}
+        />
       </div>
 
+      <UnsavedModal
+        isOpen={Boolean(tabToClose)}
+        tabTitle={tabs.find(t => t.id === tabToClose)?.title || ''}
+        onSave={handleSaveFromModal}
+        onDontSave={() => tabToClose && executeCloseTab(tabToClose)}
+        onCancel={() => setTabToClose(null)}
+      />
 
+      <QuitModal
+        isOpen={showQuitPrompt}
+        onReviewTabs={() => setShowQuitPrompt(false)}
+        onQuitAnyway={forceCloseApp}
+      />
 
-      {/* 2. UNSAVED TAB MODAL */}
-      {tabToClose && (
-        <div className="modal-overlay">
-          <div className="modal-content">
-            <h3>Unsaved Changes</h3>
-            <p>Do you want to save "{tabs.find(t => t.id === tabToClose)?.title}"?</p>
-            <div className="modal-actions">
-              <button className="modal-btn primary" onClick={handleSaveFromModal}>Save</button>
-              <button className="modal-btn danger" onClick={() => executeCloseTab(tabToClose)}>Don't Save</button>
-              <button className="modal-btn neutral" onClick={() => setTabToClose(null)}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <GoToLineModal
+        isOpen={showGoToLine}
+        lineNumber={lineNumber}
+        onLineNumberChange={setLineNumber}
+        onSubmit={executeGoToLine}
+        onCancel={() => {
+          setShowGoToLine(false);
+          setLineNumber('');
+        }}
+      />
 
-      {/* 3. QUIT APP MODAL */}
-      {showQuitPrompt && (
-        <div className="modal-overlay">
-          <div className="modal-content">
-            <h3>Quit App?</h3>
-            <p>You have unsaved tabs open. If you quit now, your work will be permanently lost.</p>
-            <div className="modal-actions">
-              <button className="modal-btn neutral" onClick={() => setShowQuitPrompt(false)}>Review Tabs</button>
-              <button className="modal-btn danger" onClick={forceCloseApp}>
-                Quit Anyway
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <RecentFilesModal
+        isOpen={showRecentModal}
+        recentFiles={recentFiles}
+        onOpenFile={async (path) => {
+          try {
+            const success = await openFileInTab(path);
+            if (success) setShowRecentModal(false);
+          } catch (e) {
+            showToast("Could not open file.", "error");
+            setRecentFiles(prev => prev.filter(p => p !== path));
+          }
+        }}
+        onClose={() => setShowRecentModal(false)}
+      />
 
-      {/* 4. GO TO LINE MODAL */}
-      {showGoToLine && (
-        <div className="modal-overlay">
-          <div className="modal-content">
-            <h3>Go To Line</h3>
-            <p>Enter the line number you want to jump to:</p>
-            <input 
-              type="number" 
-              className="find-input" 
-              style={{ width: '100%', marginBottom: '20px' }}
-              value={lineNumber}
-              autoFocus
-              onChange={(e) => setLineNumber(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && executeGoToLine()}
-            />
-            <div className="modal-actions">
-              <button className="modal-btn neutral" onClick={() => setShowGoToLine(false)}>Cancel</button>
-              <button className="modal-btn primary" onClick={executeGoToLine}>Go</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <ContextMenu
+        pos={contextMenu}
+        onCut={async () => {
+          const selectedText = editor?.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to);
+          if (selectedText) {
+            await writeText(selectedText);
+            editor?.chain().focus().deleteSelection().run();
+          }
+        }}
+        onCopy={async () => {
+          const selectedText = editor?.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to);
+          if (selectedText) await writeText(selectedText);
+        }}
+        onPaste={async () => {
+          const clipboardText = await readText();
+          if (clipboardText) editor?.chain().focus().insertContent(clipboardText).run();
+        }}
+        onFind={() => setShowSearch(true)}
+        onGoToLine={() => setShowGoToLine(true)}
+        onClose={() => setContextMenu(null)}
+      />
 
-      {/* 5. RECENT FILES MODAL */}
-      {showRecentModal && (
-        <div className="modal-overlay" onClick={() => setShowRecentModal(false)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <h3>Recent Files</h3>
-            {recentFiles.length === 0 ? (
-              <p>No recent files yet.</p>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '24px', maxHeight: '250px', overflowY: 'auto', textAlign: 'left' }}>
-                {recentFiles.map(path => (
-                  <button
-                    key={path}
-                    style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.05)', color: '#d1d1d6', padding: '10px', borderRadius: '6px', cursor: 'pointer', textAlign: 'left', wordBreak: 'break-all', fontSize: '0.85rem' }}
-                    onClick={async () => {
-                      await openFileInTab(path);
-                      setShowRecentModal(false);
-                    }}
-                    onMouseOver={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.08)'}
-                    onMouseOut={(e) => e.currentTarget.style.background = 'rgba(255,255,255,0.03)'}
-                  >
-                    {/* Shows just the file name in bold, and the full path smaller below */}
-                    <strong style={{ display: 'block', color: '#ffffff', marginBottom: '2px' }}>{path.split(/[/\\]/).pop()}</strong>
-                    <span style={{ color: '#8b8ba3', fontSize: '0.75rem' }}>{path}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="modal-actions">
-              <button className="modal-btn neutral" onClick={() => setShowRecentModal(false)}>Close</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <TabContextMenu
+        pos={tabContextMenu}
+        isPinned={Boolean(tabs.find(t => t.id === tabContextMenu?.tabId)?.isPinned)}
+        onTogglePin={() => {
+          if (tabContextMenu) togglePin(tabContextMenu.tabId);
+        }}
+        onCloseTab={(e) => {
+          if (tabContextMenu) requestCloseTab(e, tabContextMenu.tabId);
+        }}
+        onCloseMenu={() => setTabContextMenu(null)}
+      />
 
-      {contextMenu && (
-        <div 
-          className="context-menu" 
-          style={getConstrainedPos(contextMenu, 160, 200)}
-          onClick={() => setContextMenu(null)}
-        >
-          <button onClick={async () => {
-            const selectedText = editor?.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to);
-            if (selectedText) {
-              await writeText(selectedText);
-              editor?.chain().focus().deleteSelection().run();
-            }
-          }}>Cut</button>
-          
-          <button onClick={async () => {
-            const selectedText = editor?.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to);
-            if (selectedText) await writeText(selectedText);
-          }}>Copy</button>
-          
-          <button onClick={async () => {
-            const clipboardText = await readText();
-            if (clipboardText) editor?.chain().focus().insertContent(clipboardText).run();
-          }}>Paste</button>
-          
-          <div className="toolbar-divider" style={{width: '100%', height: '1px', margin: '4px 0'}}></div>
-          <button onClick={() => setShowSearch(true)}>Find (Ctrl+F)</button>
-          <button onClick={() => setShowGoToLine(true)}>Go To (Ctrl+G)</button>
-        </div>
-      )}
+      <StatusBar
+        zoomLevel={zoomLevel}
+        cursorLine={cursorPos.line}
+        cursorCol={cursorPos.col}
+        selectedWords={selectedWords}
+        words={words}
+        chars={chars}
+      />
 
-      {/* THE NEW TAB RIGHT-CLICK MENU */}
-      {tabContextMenu && (
-        <div 
-          className="context-menu" 
-          style={getConstrainedPos(tabContextMenu, 160, 120)}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button onClick={() => {
-            togglePin(tabContextMenu.tabId);
-            setTabContextMenu(null);
-          }}>
-            {tabs.find(t => t.id === tabContextMenu.tabId)?.isPinned ? 'Unpin Tab' : 'Pin Tab'}
-          </button>
-          
-          <div className="toolbar-divider" style={{width: '100%', height: '1px', margin: '4px 0'}}></div>
-          
-          <button onClick={(e) => {
-            requestCloseTab(e as any, tabContextMenu.tabId);
-            setTabContextMenu(null);
-          }}>
-            Close Tab
-          </button>
-        </div>
-      )}
-
-      {/* NEW ROW 4: SEPARATED STATUS BAR ROW */}
-      <div className="status-bar-row">
-        
-        {/* NEW: The Clock in the bottom left */}
-        <div className="status-bar-left">
-          {currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </div>
-
-        <div className="status-bar">
-          <span>{zoomLevel}%</span>
-          <span className="status-divider">|</span>
-          <span>Ln {cursorPos.line}, Col {cursorPos.col}</span>
-          <span className="status-divider">|</span>
-          <span>
-            {selectedWords > 0 ? `${selectedWords} of ` : ''}
-            {words} words ({chars} chars)
-          </span>
-        </div>
-      </div>
+      <ToastNotification toast={toast} />
     </div>
   );
 }

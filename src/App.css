@@ -759,7 +759,13 @@ body {
   }
 
   .notepad strong,
-  .notepad b {
+  .notepad b,
+  .notepad h1,
+  .notepad h2,
+  .notepad h3,
+  .notepad h4,
+  .notepad h5,
+  .notepad h6 {
     color: black !important;
     font-weight: 800 !important;
   }
@@ -847,6 +853,10 @@ body {
 }
 
 .fun-animation-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  outline: none;
   width: 34px;
   height: 34px;
   display: flex;
@@ -856,7 +866,7 @@ body {
   position: relative;
   border-radius: 6px;
   transition: background-color 0.2s ease;
-  -webkit-app-region: no-drag; /* Ensures you can click it without dragging the window */
+  user-select: none;
 }
 
 .fun-animation-btn:hover {
@@ -870,4 +880,44 @@ body {
   border-radius: 50%;
   background-color: rgb(82, 82, 91); /* The resting color you set in JS */
   will-change: transform, background-color; /* Tells the browser to optimize for 60fps */
+}
+
+/* --- 12. TOAST NOTIFICATIONS --- */
+.toast-notification {
+  position: fixed;
+  bottom: 32px;
+  right: 24px;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  animation: toastFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+
+.toast-error {
+  background: #2a1215;
+  color: #fca5a5;
+  border: 1px solid #7f1d1d;
+}
+
+.toast-info {
+  background: #111b27;
+  color: #93c5fd;
+  border: 1px solid #1e3a5f;
+}
+
+.toast-success {
+  background: #0d2318;
+  color: #86efac;
+  border: 1px solid #166534;
+}
+
+@keyframes toastFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }

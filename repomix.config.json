@@ -1,0 +1,32 @@
+{
+  "output": {
+    "filePath": "codebase.txt",
+    "style": "xml"
+  },
+  "ignore": {
+    "customPatterns": [
+      "split_codebase.*",
+      "repomix.config.json",
+      "codebase*.txt",
+      "repomix-output.*",
+      "build/**",
+      "dist/**",
+      "dist-ssr/**",
+      "out/**",
+      "node_modules/**",
+      "src-tauri/target/**",
+      "src-tauri/gen/**",
+      "src-tauri/icons/**",
+      "*.exe",
+      "*.msi",
+      "*.log",
+      ".git/**",
+      ".gitignore",
+      "package-lock.json",
+      "Cargo.lock",
+      ".vscode/**",
+      ".idea/**",
+      "README.md"
+    ]
+  }
+}
