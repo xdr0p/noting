@@ -313,20 +313,34 @@ const MathEngine = Extension.create({
             return;
           }
 
-          // 4. Standard Math Evaluation (e.g., 50 * 2=)
-          if (trimmed.includes('=')) return null;
+          // 4. Standard Math Evaluation (e.g., 50 * 2= or chained 2 * 2 = 4 * 2=)
+          if (trimmed.includes('=>')) return null;
+
+          let targetExpr = trimmed;
+          let prefix = '';
+
+          if (trimmed.includes('=')) {
+            const lastEqIndex = trimmed.lastIndexOf('=');
+            const afterEq = trimmed.substring(lastEqIndex + 1).trim();
+            if (!isMathProblem(afterEq)) {
+              return null; // Already solved / not a math problem after '='
+            }
+            prefix = trimmed.substring(0, lastEqIndex + 1) + ' ';
+            targetExpr = afterEq;
+          }
+
           const prevResult = getPreviousLineResult(state.doc, range.from);
 
           try {
-            const cleanExpr = buildMathExpression(trimmed, prevResult);
+            const cleanExpr = buildMathExpression(targetExpr, prevResult);
             if (!cleanExpr) return null;
             const result = mathParser.parse(cleanExpr).evaluate();
             if (!Number.isFinite(result)) return null;
 
             const rounded = Math.round(result * 10000) / 10000;
-            const formattedExpr = formatMathExpression(trimmed);                          
+            const formattedExpr = formatMathExpression(targetExpr);                          
             
-            state.tr.insertText(`${leadingSpaces}${formattedExpr} = ${rounded.toLocaleString()} `, range.from, range.to);
+            state.tr.insertText(`${leadingSpaces}${prefix}${formattedExpr} = ${rounded.toLocaleString()} `, range.from, range.to);
           } catch (e) {
             return null; 
           }
@@ -354,6 +368,8 @@ const MathEngine = Extension.create({
           const to = $head.pos;
           const leadingSpaces = expression.match(/^\s*/)?.[0] || '';
 
+          if (trimmed.includes('=>')) return false;
+
           // 1. Solve Equation (e.g. 10 = 3 + x)
           if (trimmed.includes('=')) {
             const sol = solveLinearEquation(trimmed);
@@ -366,23 +382,35 @@ const MathEngine = Extension.create({
             }
           }
 
-          // 2. Standard Math Evaluation (e.g. 50 * 2) - Enter only intercepts math expressions
-          if (trimmed.includes('=')) return false;
-          if (isMathProblem(trimmed)) {
+          // 2. Standard Math Evaluation (e.g. 50 * 2 or chained 2 * 2 = 4 * 2)
+          let targetExpr = trimmed;
+          let prefix = '';
+
+          if (trimmed.includes('=')) {
+            const lastEqIndex = trimmed.lastIndexOf('=');
+            const afterEq = trimmed.substring(lastEqIndex + 1).trim();
+            if (!isMathProblem(afterEq)) {
+              return false; // Already solved / not a math problem, let Enter insert newline
+            }
+            prefix = trimmed.substring(0, lastEqIndex + 1) + ' ';
+            targetExpr = afterEq;
+          }
+
+          if (isMathProblem(targetExpr)) {
             const prevResult = getPreviousLineResult(state.doc, from);
 
             try {
-              const cleanExpr = buildMathExpression(trimmed, prevResult);
+              const cleanExpr = buildMathExpression(targetExpr, prevResult);
               if (!cleanExpr) return false;
               const result = mathParser.parse(cleanExpr).evaluate();
               
               if (!Number.isFinite(result)) return false;
 
               const rounded = Math.round(result * 10000) / 10000;
-              const formattedExpr = formatMathExpression(trimmed);
+              const formattedExpr = formatMathExpression(targetExpr);
 
               this.editor.view.dispatch(
-                state.tr.insertText(`${leadingSpaces}${formattedExpr} = ${rounded.toLocaleString()} `, from, to)
+                state.tr.insertText(`${leadingSpaces}${prefix}${formattedExpr} = ${rounded.toLocaleString()} `, from, to)
               );
               
               return true;

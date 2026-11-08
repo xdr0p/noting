@@ -136,12 +136,51 @@ assert.equal(isTabEmpty({ id: '1', title: 'Untitled', content: '<p><br class="Pr
 assert.equal(isTabEmpty({ id: '1', title: 'File', content: '', path: '/path/to/file' }), false);
 assert.equal(isTabEmpty({ id: '1', title: 'Untitled', content: '<p>Content</p>' }), false);
 
-// Already solved equations containing '=' must not evaluate as standard math
-const shouldEvaluateMath = (trimmed) => {
-  if (trimmed.includes('=')) return false;
-  return true;
+// Chained math and already-solved equation handling
+const isMathProblem = (expr) => {
+  const trimmed = expr.trim();
+  if (!trimmed) return false;
+  if (/[\+\-\*\/\^]/.test(trimmed)) return true;
+  if (/ans/i.test(trimmed)) return true;
+  return false;
 };
-assert.equal(shouldEvaluateMath('2 * 2 = 4'), false);
-assert.equal(shouldEvaluateMath('2 * 2'), true);
 
-console.log('✓ All 29 tests passed successfully.');
+const resolveMathExpression = (trimmed, prevResult = null) => {
+  if (trimmed.includes('=>')) return null;
+
+  let targetExpr = trimmed;
+  let prefix = '';
+
+  if (trimmed.includes('=')) {
+    const lastEqIndex = trimmed.lastIndexOf('=');
+    const afterEq = trimmed.substring(lastEqIndex + 1).trim();
+    if (!isMathProblem(afterEq)) {
+      return null;
+    }
+    prefix = trimmed.substring(0, lastEqIndex + 1) + ' ';
+    targetExpr = afterEq;
+  }
+
+  try {
+    const cleanExpr = buildMathExpression(targetExpr, prevResult);
+    if (!cleanExpr) return null;
+    const result = mathParser.parse(cleanExpr).evaluate();
+    if (!Number.isFinite(result)) return null;
+
+    const rounded = Math.round(result * 10000) / 10000;
+    return `${prefix}${targetExpr} = ${rounded.toLocaleString()} `;
+  } catch (e) {
+    return null;
+  }
+};
+
+// Simple evaluation
+assert.equal(resolveMathExpression('2 * 2'), '2 * 2 = 4 ');
+// Chained evaluation continues after previous result
+assert.equal(resolveMathExpression('2 * 2 = 4 * 2'), '2 * 2 = 4 * 2 = 8 ');
+assert.equal(resolveMathExpression('2 * 2 = 4 * 2 = 8 + 10'), '2 * 2 = 4 * 2 = 8 + 10 = 18 ');
+// Already solved equation (no operator after last '=') does not re-evaluate or mangle
+assert.equal(resolveMathExpression('2 * 2 = 4'), null);
+assert.equal(resolveMathExpression('2 * 2 = 4 '), null);
+
+console.log('✓ All 32 tests passed successfully.');
