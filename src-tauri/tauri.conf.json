@@ -16,8 +16,8 @@
         "title": "noting",
         "width": 800,
         "height": 600,
-        "minWidth": 480,
-        "minHeight": 320,
+        "minWidth": 760,
+        "minHeight": 480,
         "decorations": false
       }
     ],

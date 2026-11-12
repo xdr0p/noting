@@ -42,6 +42,7 @@ export const SearchBox = memo(function SearchBox({
       onKeyDown={(e) => {
         if (e.key === 'Escape') {
           e.preventDefault();
+          e.stopPropagation();
           if (searchTerm || replaceTerm) {
             onClearTerms();
           } else {

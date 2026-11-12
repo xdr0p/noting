@@ -1,4 +1,16 @@
-@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600&display=swap');
+@font-face {
+  font-family: 'Nunito';
+  font-style: normal;
+  font-weight: 400;
+  src: url('/fonts/nunito-400.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Nunito';
+  font-style: normal;
+  font-weight: 600;
+  src: url('/fonts/nunito-600.woff2') format('woff2');
+}
 
 /* --- 1. The Foundation --- */
 * {
@@ -32,7 +44,6 @@ body {
   height: 48px;
   min-height: 48px; /* Locked height */
   flex-shrink: 0;   /* Prevents Row 2 from pushing it up */
-  -webkit-app-region: drag;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
@@ -70,16 +81,14 @@ body {
   align-items: center;
   justify-content: space-between; /* Pushes title to left, X to right */
   height: 38px;
-  min-width: 120px;
-  max-width: 200px;
-  flex-shrink: 0;
+  width: 150px;
+  flex: 0 0 150px;
   background-color: transparent;
   border-radius: 8px 8px 0 0;
   padding: 0 6px 0 12px; 
   cursor: pointer;
   color: #8b8ba3;
   margin-right: 4px;
-  -webkit-app-region: no-drag;
 }
 
 .tab.active {
@@ -118,6 +127,7 @@ body {
 
 
 .tab-title {
+  min-width: 0;
   font-size: 0.85rem;
   white-space: nowrap;
   overflow: hidden;
@@ -137,8 +147,7 @@ body {
   align-items: center;
   justify-content: center;
   font-size: 1.1rem;
-  transition: all 0.2s ease-in-out; 
-  -webkit-app-region: no-drag;
+  transition: all 0.2s ease-in-out;
 }
 
 /* The neat red hover animation! */
@@ -169,7 +178,6 @@ body {
   align-items: center;
   justify-content: center;
   transition: all 0.15s ease;
-  -webkit-app-region: no-drag;
 }
 
 .add-tab-plus:hover {
@@ -282,7 +290,6 @@ body {
   align-self: flex-end;
   transition: all 0.15s ease;
   user-select: none;
-  -webkit-app-region: no-drag;
 }
 
 .tab-scroll-btn:hover:not(:disabled) {
@@ -313,7 +320,6 @@ body {
   justify-content: center;
   color: #71717a;
   cursor: pointer;
-  -webkit-app-region: no-drag;
 }
 
 .control-btn:hover { background-color: rgba(255, 255, 255, 0.1) !important; }
@@ -829,15 +835,20 @@ body {
 }
 
 .minimap-content * {
-  color: #a0a0ab !important; 
+  color: #a0a0ab !important;
   font-family: 'Nunito', sans-serif;
   line-height: 1.6;
-  
-  /* FIXED: Aggressively forces text to wrap inside the box, even without spaces */
-  word-wrap: break-word !important;
   overflow-wrap: anywhere !important;
-  word-break: break-all !important;
-  white-space: pre-wrap !important;
+  word-break: break-word !important;
+  white-space: normal !important;
+}
+
+.no-wrap .minimap-content p {
+  white-space: pre !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+  width: max-content;
+  min-width: 100%;
 }
 
 /* --- 12. FLOW STATE ANIMATION --- */
@@ -862,12 +873,28 @@ body {
   cursor: pointer;
   position: relative;
   border-radius: 6px;
-  transition: background-color 0.2s ease;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
   user-select: none;
 }
 
 .fun-animation-btn:hover {
-  background-color: rgba(255, 255, 255, 0.05);
+  background-color: transparent;
+}
+
+.fun-animation-btn:focus,
+.fun-animation-btn:focus-visible,
+.fun-animation-btn:active {
+  outline: none !important;
+  box-shadow: none !important;
+  background-color: transparent !important;
+}
+
+.fun-animation-btn:hover .dot,
+.fun-animation-btn:active .dot {
+  filter: brightness(1.5) drop-shadow(0 0 3px rgba(255, 255, 255, 0.35));
 }
 
 .dot {
@@ -877,6 +904,7 @@ body {
   border-radius: 50%;
   background-color: rgb(82, 82, 91); /* The resting color you set in JS */
   will-change: transform, background-color; /* Tells the browser to optimize for 60fps */
+  transition: filter 0.15s ease;
 }
 
 /* --- 12. TOAST NOTIFICATIONS --- */

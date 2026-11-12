@@ -43,7 +43,7 @@ if (-not $inputFile) {
 }
 
 Write-Host "Reading $inputFile..." -ForegroundColor Cyan
-$raw = Get-Content (Join-Path $PSScriptRoot $inputFile) -Raw
+$raw = Get-Content (Join-Path $PSScriptRoot $inputFile) -Raw -Encoding UTF8
 
 # 3. Extract Header (Summary + Directory Tree before <files>)
 $header = ""

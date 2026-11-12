@@ -1,7 +1,6 @@
 import TurndownService from 'turndown';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import { Parser } from 'expr-eval';
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager';
 import SearchAndReplace from '@sereneinserenade/tiptap-search-and-replace';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -30,7 +29,24 @@ import { GoToLineModal } from './components/modals/GoToLineModal';
 import { RecentFilesModal } from './components/modals/RecentFilesModal';
 import { ContextMenu } from './components/modals/ContextMenu';
 import { TabContextMenu } from './components/modals/TabContextMenu';
-
+import {
+  toSuperscript,
+  SUPERSCRIPT_CHARS,
+  MATH_CLASS_RE,
+  MATH_FIND_RE,
+  buildMathTransaction,
+} from './lib/math';
+import {
+  titleFromPath,
+  titleFromEditor,
+  suggestedFileName,
+  isEmptyUntitledTab,
+  isBlankUnsavedTab,
+  isTxtFile,
+  textToHtml,
+  htmlToText,
+  pasteTextToHtml,
+} from './lib/text';
 
 // Custom Italic extension that disables default asterisk/underscore input rules
 // so typing math asterisks like 5*2*3 doesn't accidentally format text as italic
@@ -39,138 +55,6 @@ const CustomItalic = Italic.extend({
     return [];
   },
 });
-
-const SUPERSCRIPT_CHARS = '⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾';
-
-const toSuperscript = (value: string) => {
-  const map: Record<string, string> = {
-    '0': '⁰',
-    '1': '¹',
-    '2': '²',
-    '3': '³',
-    '4': '⁴',
-    '5': '⁵',
-    '6': '⁶',
-    '7': '⁷',
-    '8': '⁸',
-    '9': '⁹',
-    '+': '⁺',
-    '-': '⁻',
-    '(': '⁽',
-    ')': '⁾',
-  };
-
-  return value
-    .split('')
-    .map((char) => map[char] ?? char)
-    .join('');
-};
-
-const fromSuperscript = (value: string) => {
-  const map: Record<string, string> = {
-    '⁰': '0',
-    '¹': '1',
-    '²': '2',
-    '³': '3',
-    '⁴': '4',
-    '⁵': '5',
-    '⁶': '6',
-    '⁷': '7',
-    '⁸': '8',
-    '⁹': '9',
-    '⁺': '+',
-    '⁻': '-',
-    '⁽': '(',
-    '⁾': ')',
-  };
-
-  return value
-    .split('')
-    .map((char) => map[char] ?? char)
-    .join('');
-};
-
-const makeExponentsPretty = (expression: string) => {
-  return expression.replace(/(\d+|\))\s*\^\s*(-?[0-9]+)/g, (_match, base, exponent) => {
-    return `${base}${toSuperscript(exponent)}`;
-  });
-};
-
-const mathParser = new Parser();
-
-const normalizeSuperscriptForMath = (expression: string) => {
-  const superscriptRun = new RegExp(`(\\d+|\\))([${SUPERSCRIPT_CHARS}]+)`, 'g');
-
-  return expression.replace(superscriptRun, (_match, base, exponent) => {
-    const normalExponent = fromSuperscript(exponent);
-    return `${base}^${normalExponent.startsWith('-') ? `(${normalExponent})` : normalExponent}`;
-  });
-};
-
-const getPreviousLineResult = (doc: any, pos: number): number | null => {
-  let prevResult: number | null = null;
-  doc.nodesBetween(0, pos, (node: any) => {
-    if (node.isTextblock && node.textContent.trim().length > 0) {
-      const text = node.textContent.trim();
-      const eqMatch = text.match(/=\s*(-?[0-9,]+(?:\.[0-9]+)?)\s*$/);
-      if (eqMatch) {
-        const val = parseFloat(eqMatch[1].replace(/,/g, ''));
-        if (!isNaN(val)) prevResult = val;
-      } else {
-        const numMatch = text.match(/^(-?[0-9,]+(?:\.[0-9]+)?)$/);
-        if (numMatch) {
-          const val = parseFloat(numMatch[1].replace(/,/g, ''));
-          if (!isNaN(val)) prevResult = val;
-        }
-      }
-    }
-  });
-  return prevResult;
-};
-
-const buildMathExpression = (expression: string, prevResult?: number | null) => {
-  let expr = expression.replace(/,/g, '').replace(/\s+/g, '');
-  
-  if (/ans/i.test(expr)) {
-    const valStr = prevResult !== null && prevResult !== undefined ? String(prevResult) : '0';
-    expr = expr.replace(/ans/gi, valStr);
-  }
-
-  return normalizeSuperscriptForMath(expr)
-    // Group negative exponents — output ^ (expr-eval operator)
-    .replace(/\^(-?[0-9]+(?:\.[0-9]+)?)/g, (_match, exponent) => {
-      return `^${exponent.startsWith('-') ? `(${exponent})` : exponent}`;
-    })
-    // Accept user-typed ** as an alternate exponent syntax
-    .replace(/\*\*/g, '^')
-    // Implicit multiplication — expr-eval throws on juxtaposition
-    .replace(/\)\s*\(/g, ')*(')
-    .replace(/(\d)\s*\(/g, '$1*(')
-    .replace(/\)\s*(\d)/g, ')*$1')
-    // Whitelist ^ so it survives
-    .replace(/[^0-9\+\-\*\/\.\(\)\^]/g, '');
-};
-
-const formatMathSide = (expr: string) => {
-  return makeExponentsPretty(expr.replace(/,/g, '').replace(/\s+/g, ''))
-    .replace(/([\+\-\*\/])/g, ' $1 ')
-    .replace(/\s+/g, ' ')
-    .trim();
-};
-
-const formatEquation = (eqStr: string) => {
-  const parts = eqStr.split('=');
-  if (parts.length === 2) {
-    const left = formatMathSide(parts[0]);
-    const right = formatMathSide(parts[1]);
-    return `${left} = ${right}`;
-  }
-  return formatMathSide(eqStr);
-};
-
-const formatMathExpression = (expression: string) => {
-  return formatMathSide(expression);
-};
 
 const AutoExponent = Extension.create({
   name: 'autoExponent',
@@ -188,7 +72,7 @@ const AutoExponent = Extension.create({
       }),
 
       new InputRule({
-        find: /([⁰¹²³⁴⁵⁶⁷⁸⁹]+)([0-9])$/,
+        find: new RegExp('([' + SUPERSCRIPT_CHARS + ']+)([0-9])$'),
         handler: ({ state, range, match }) => {
           const existingExponent = match[1];
           const nextDigit = match[2];
@@ -206,13 +90,13 @@ const MathSpacing = Extension.create({
   addInputRules() {
     return [
       new InputRule({
-        find: /([0-9a-zA-Z\)\u00B9\u00B2\u00B3\u2070-\u207F])([\+\-\*\/])$/,
+        find: /([0-9a-zA-Z\)\u00B9\u00B2\u00B3\u2070-\u207F])([\+\-\*/])$/,
         handler: ({ state, range, match }) => {
           state.tr.insertText(`${match[1]} ${match[2]} `, range.from, range.to);
         },
       }),
       new InputRule({
-        find: /([\+\-\*\/])([0-9a-zA-Z])$/,
+        find: /([\+\-\*/])([0-9a-zA-Z])$/,
         handler: ({ state, range, match }) => {
           state.tr.insertText(`${match[1]} ${match[2]}`, range.from, range.to);
         },
@@ -221,53 +105,6 @@ const MathSpacing = Extension.create({
   },
 });
 
-const isMathProblem = (expr: string) => {
-  const trimmed = expr.trim();
-  if (!trimmed) return false;
-  if (/[\+\-\*\/\^]/.test(trimmed)) return true;
-  if (/ans/i.test(trimmed)) return true;
-  return false;
-};
-
-const solveLinearEquation = (eqStr: string): { variable: string; value: number } | null => {
-  const parts = eqStr.split('=');
-  if (parts.length !== 2) return null;
-  const left = parts[0].trim();
-  const right = parts[1].trim();
-
-  // Look for single variable letter (x, y, z, etc.)
-  const cleanForVar = (left + ' ' + right).replace(/ans/gi, '0');
-  const varMatch = cleanForVar.match(/(?:^|[^a-zA-Z])([a-zA-Z])(?:[^a-zA-Z]|$)/);
-  if (!varMatch) return null;
-  const variable = varMatch[1];
-
-  const evalSide = (exprStr: string, varVal: number) => {
-    const withImplicit = exprStr
-      .replace(new RegExp(`(\\d)\\s*${variable}\\b`, 'gi'), `$1*(${varVal})`)
-      .replace(new RegExp(`\\b${variable}\\b`, 'gi'), `(${varVal})`);
-    const clean = buildMathExpression(withImplicit);
-    return mathParser.parse(clean).evaluate();
-  };
-
-  try {
-    const f = (v: number) => evalSide(left, v) - evalSide(right, v);
-    const f0 = f(0);
-    const f1 = f(1);
-    const slope = f1 - f0;
-    if (Math.abs(slope) < 1e-9) return null;
-    const sol = -f0 / slope;
-    if (!Number.isFinite(sol)) return null;
-
-    // VERIFICATION: Ensure equation is linear and f(sol) is zero
-    if (Math.abs(f(sol)) > 1e-4) return null;
-
-    const rounded = Math.round(sol * 10000) / 10000;
-    return { variable, value: rounded };
-  } catch (e) {
-    return null;
-  }
-};
-
 const MathEngine = Extension.create({
   name: 'mathEngine',
   priority: 1000,
@@ -275,7 +112,7 @@ const MathEngine = Extension.create({
   addInputRules() {
     return [
       new InputRule({
-        find: /([0-9a-zA-Z\+\-\*\/\^\.\(\)\s,⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾=]+)=$/,
+        find: MATH_FIND_RE,
         handler: ({ state, range }) => {
           const $head = state.doc.resolve(range.to);
           const textBeforeCursorInBlock = $head.parent.textBetween(0, $head.parentOffset, '\n', '\n');
@@ -284,74 +121,12 @@ const MathEngine = Extension.create({
 
           if (currentLineText.includes('=>')) return null;
 
-          const lineMatch = currentLineText.match(/([0-9a-zA-Z\+\-\*\/\^\.\(\)\s,⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾=]+)=$/);
+          const lineMatch = currentLineText.match(MATH_FIND_RE);
           if (!lineMatch) return null;
 
-          const expression = lineMatch[1]; 
-          const leadingSpaces = expression.match(/^\s*/)?.[0] || '';
-          const trimmed = expression.trim();
           const from = $head.pos - lineMatch[0].length;
           const to = range.to;
-          
-          // 1. Solve Equation (e.g., 10 = 3 + x or x * 1 = 5)
-          if (trimmed.includes('=')) {
-            const sol = solveLinearEquation(trimmed);
-            if (sol) {
-              const formattedEq = formatEquation(trimmed);
-              state.tr.insertText(`${leadingSpaces}${formattedEq}  =>  ${sol.variable} = ${sol.value.toLocaleString()} `, from, to);
-              return;
-            }
-          }
-
-          // 2. Standalone number: 10= becomes 10 = (formatted with commas if long)
-          if (/^\d+(\.\d+)?$/.test(trimmed)) {
-            const [intPart, decPart] = trimmed.split('.');
-            const formattedInt = Number(intPart).toLocaleString();
-            const formatted = decPart !== undefined ? `${formattedInt}.${decPart}` : formattedInt;
-            state.tr.insertText(`${leadingSpaces}${formatted} = `, from, to);
-            return;
-          }
-
-          // 3. Expression with unknown variable: typing = formats it as an equation start (e.g., x * 1= becomes x * 1 = )
-          const cleanForVar = trimmed.replace(/ans/gi, '0');
-          const varMatch = cleanForVar.match(/(?:^|[^a-zA-Z])([a-zA-Z])(?:[^a-zA-Z]|$)/);
-          if (varMatch && !trimmed.includes('=')) {
-            const formatted = formatMathSide(trimmed);
-            state.tr.insertText(`${leadingSpaces}${formatted} = `, from, to);
-            return;
-          }
-
-          // 4. Standard Math Evaluation (e.g., 50 * 2= or chained 2 * 2 = 4 * 2=)
-          if (trimmed.includes('=>')) return null;
-
-          let targetExpr = trimmed;
-          let prefix = '';
-
-          if (trimmed.includes('=')) {
-            const lastEqIndex = trimmed.lastIndexOf('=');
-            const afterEq = trimmed.substring(lastEqIndex + 1).trim();
-            if (!isMathProblem(afterEq)) {
-              return null; // Already solved / not a math problem after '='
-            }
-            prefix = trimmed.substring(0, lastEqIndex + 1) + ' ';
-            targetExpr = afterEq;
-          }
-
-          const prevResult = getPreviousLineResult(state.doc, from);
-
-          try {
-            const cleanExpr = buildMathExpression(targetExpr, prevResult);
-            if (!cleanExpr) return null;
-            const result = mathParser.parse(cleanExpr).evaluate();
-            if (!Number.isFinite(result)) return null;
-
-            const rounded = Math.round(result * 10000) / 10000;
-            const formattedExpr = formatMathExpression(targetExpr);                          
-            
-            state.tr.insertText(`${leadingSpaces}${prefix}${formattedExpr} = ${rounded.toLocaleString()} `, from, to);
-          } catch (e) {
-            return null; 
-          }
+          return buildMathTransaction(state, lineMatch[0], from, to);
         },
       }),
     ];
@@ -372,74 +147,22 @@ const MathEngine = Extension.create({
 
         if (currentLineText.includes('=>')) return false;
 
-        const match = currentLineText.match(/([0-9a-zA-Z\+\-\*\/\^\.\(\)\s,⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾=]+)$/);
+        const match = currentLineText.match(MATH_CLASS_RE);
+        if (!match || match[1].trim() === '') return false;
 
-        if (match && match[1].trim() !== '') {
-          const expression = match[1];
-          const trimmed = expression.trim();
-          const from = $head.pos - expression.length;
-          const to = $head.pos;
-          const leadingSpaces = expression.match(/^\s*/)?.[0] || '';
+        const from = $head.pos - match[1].length;
+        const to = $head.pos;
 
-          if (trimmed.includes('=>')) return false;
-
-          // 1. Solve Equation (e.g. 10 = 3 + x)
-          if (trimmed.includes('=')) {
-            const sol = solveLinearEquation(trimmed);
-            if (sol) {
-              const formattedEq = formatEquation(trimmed);
-              this.editor.view.dispatch(
-                state.tr.insertText(`${leadingSpaces}${formattedEq}  =>  ${sol.variable} = ${sol.value.toLocaleString()} `, from, to)
-              );
-              return true;
-            }
-          }
-
-          // 2. Standard Math Evaluation (e.g. 50 * 2 or chained 2 * 2 = 4 * 2)
-          let targetExpr = trimmed;
-          let prefix = '';
-
-          if (trimmed.includes('=')) {
-            const lastEqIndex = trimmed.lastIndexOf('=');
-            const afterEq = trimmed.substring(lastEqIndex + 1).trim();
-            if (!isMathProblem(afterEq)) {
-              return false; // Already solved / not a math problem, let Enter insert newline
-            }
-            prefix = trimmed.substring(0, lastEqIndex + 1) + ' ';
-            targetExpr = afterEq;
-          }
-
-          if (isMathProblem(targetExpr)) {
-            const prevResult = getPreviousLineResult(state.doc, from);
-
-            try {
-              const cleanExpr = buildMathExpression(targetExpr, prevResult);
-              if (!cleanExpr) return false;
-              const result = mathParser.parse(cleanExpr).evaluate();
-              
-              if (!Number.isFinite(result)) return false;
-
-              const rounded = Math.round(result * 10000) / 10000;
-              const formattedExpr = formatMathExpression(targetExpr);
-
-              this.editor.view.dispatch(
-                state.tr.insertText(`${leadingSpaces}${prefix}${formattedExpr} = ${rounded.toLocaleString()} `, from, to)
-              );
-              
-              return true;
-            } catch (e) {
-              return false; 
-            }
-          }
+        const tr = buildMathTransaction(state, match[1], from, to);
+        if (tr) {
+          this.editor.view.dispatch(tr);
+          return true;
         }
-        
         return false;
       },
     };
   },
 });
-
-
 
 const turndownService = new TurndownService({
   headingStyle: 'atx',
@@ -467,38 +190,11 @@ const parseFileContent = async (rawText: string): Promise<string> => {
   return DOMPurify.sanitize(rawHtml, PURIFY_CONFIG);
 };
 
-const titleFromPath = (path: string, fallback = 'Untitled') =>
-  (path.split(/[/\\]/).pop() || fallback).replace(/\.[^/.]+$/, '');
-
-const titleFromText = (text: string) => {
-  const firstLine = text.split('\n')[0].replace(/<[^>]+>/g, '').trim();
-  return firstLine.length > 30 ? `${firstLine.substring(0, 30)}...` : firstLine || 'Untitled';
-};
-
-const suggestedFileName = (title: string) =>
-  title.replace(/[<>:"/\\|?*\u0000-\u001F]/g, '').trim() || 'Untitled';
-
-const isTabEmpty = (tab: Tab, activeEditor?: any, activeId?: string) => {
-  if (tab.path) return false;
-  if (tab.id === activeId && activeEditor) return activeEditor.isEmpty;
-  return tab.content === '' || tab.content === '<p></p>'
-    || tab.content === '<p><br></p>'
-    || tab.content === '<p><br class="ProseMirror-trailingBreak"></p>';
-};
-
-const isEmptyUntitledTab = (tab: Tab, activeEditor?: any, activeId?: string) =>
-  !tab.path && isTabEmpty(tab, activeEditor, activeId);
-
-const isBlankUnsavedTab = (tab: Tab, activeEditor?: any, activeId?: string) =>
-  isEmptyUntitledTab(tab, activeEditor, activeId) && !tab.isDirty;
-
 const updatePlaceholderVisibility = (editor: any) => {
   const shouldHide = editor.state.doc.childCount > 1
     || (editor.state.doc.firstChild?.content.size ?? 0) > 0;
   editor.view.dom.classList.toggle('hide-empty-placeholder', shouldHide);
 };
-
-
 
 function App() {
   const appWindow = useMemo(() => getCurrentWindow(), []);
@@ -556,13 +252,28 @@ function App() {
   useEffect(() => { activeTabIdRef.current = activeTabId; }, [activeTabId]);
 
   const activeTab = tabs.find(t => t.id === activeTabId) || tabs[0];
-  // activeTabRef is updated in an effect so it reflects committed renders,
-  // making it safe for Concurrent Mode. Flush paths (which use tabsRef + contentMapRef)
-  // are unobservable to render timing.
-  const activeTabRef = useRef(activeTab);
-  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
+  const [minimapContent, setMinimapContent] = useState<string>(tabs[0].content);
+  const titleRafRef = useRef<number | null>(null);
+  const minimapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (titleRafRef.current !== null) cancelAnimationFrame(titleRafRef.current);
+    if (minimapTimerRef.current !== null) clearTimeout(minimapTimerRef.current);
+  }, []);
 
   const editorRef = useRef<any>(null);
+
+  const getActiveTab = useCallback(
+    () => tabsRef.current.find(t => t.id === activeTabIdRef.current) || tabsRef.current[0],
+    []
+  );
+
+  const checkTabDirty = useCallback((tab: Tab) => {
+    if (!tab.isDirty) return false;
+    if (isEmptyUntitledTab(tab, editorRef.current, activeTabIdRef.current)) return false;
+    return true;
+  }, []);
 
   const getTabContent = useCallback((tab: Tab): string => {
     if (tab.id === activeTabIdRef.current && editorRef.current) {
@@ -573,6 +284,7 @@ function App() {
 
   const sessionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const debouncedSetTabsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const quotaToastShownRef = useRef(false);
 
   const flushDebouncedTabs = useCallback(() => {
     if (debouncedSetTabsTimer.current) {
@@ -581,16 +293,18 @@ function App() {
       const currentEditor = editorRef.current;
       const currentTabId = activeTabIdRef.current;
       if (currentEditor && currentTabId) {
-        const safeTitle = titleFromText(currentEditor.getText());
+        const safeTitle = titleFromEditor(currentEditor);
         const latestContent = contentMapRef.current.get(currentTabId) ?? currentEditor.getHTML();
-        setTabs(prev => prev.map(t => {
+        const next = tabsRef.current.map(t => {
           if (t.id === currentTabId) {
             const isActuallyDirty = !(!t.path && currentEditor.isEmpty);
             const titleToUse = t.path ? titleFromPath(t.path, safeTitle) : safeTitle;
             return { ...t, content: latestContent, isDirty: isActuallyDirty, title: titleToUse };
           }
           return t;
-        }));
+        });
+        tabsRef.current = next;
+        setTabs(next);
       }
     }
   }, []);
@@ -603,8 +317,18 @@ function App() {
 
   const switchTab = useCallback((newId: string) => {
     if (newId === activeTabIdRef.current) return;
+    if (titleRafRef.current !== null) {
+      cancelAnimationFrame(titleRafRef.current);
+      titleRafRef.current = null;
+    }
+    if (minimapTimerRef.current !== null) {
+      clearTimeout(minimapTimerRef.current);
+      minimapTimerRef.current = null;
+    }
     flushDebouncedTabs();
+    activeTabIdRef.current = newId;
     setActiveTabId(newId);
+    setMinimapContent(contentMapRef.current.get(newId) ?? '');
   }, [flushDebouncedTabs]);
 
   const flushSessionSave = useCallback(() => {
@@ -628,10 +352,15 @@ function App() {
       };
       localStorage.setItem('noting_session', JSON.stringify(payload));
       localStorage.setItem('noting_active_tab_id', activeTabIdRef.current);
-    } catch (e) {
+      quotaToastShownRef.current = false;
+    } catch (e: any) {
+      if (e?.name === 'QuotaExceededError' && !quotaToastShownRef.current) {
+        quotaToastShownRef.current = true;
+        showToast('Session buffer full — save your files.', 'error');
+      }
       console.error('Failed to flush session to localStorage', e);
     }
-  }, [getTabContent]);
+  }, [getTabContent, flushDebouncedTabs, showToast]);
 
   useEffect(() => {
     if (sessionTimer.current) clearTimeout(sessionTimer.current);
@@ -656,19 +385,26 @@ function App() {
 
       const writes = dirtyPathTabs.map(tab => {
         const html = getTabContent(tab);
-        return writeTextFile(tab.path!, getMarkdown(html))
-          .then(() => ({ tab, ok: true as const }))
-          .catch(err => ({ tab, ok: false as const, err }));
+        const payload = isTxtFile(tab.path) ? htmlToText(html) : getMarkdown(html);
+        return writeTextFile(tab.path!, payload)
+          .then(() => ({ tab, writtenHtml: html, ok: true as const }))
+          .catch(err => ({ tab, writtenHtml: html, ok: false as const, err }));
       });
 
       Promise.allSettled(writes).then(results => {
-        const succeededIds = results
+        const successes = results
           .filter(r => r.status === 'fulfilled' && r.value.ok)
-          .map(r => (r as PromiseFulfilledResult<{ tab: Tab; ok: true }>).value.tab.id);
-        if (succeededIds.length > 0) {
-          setTabs(prev => prev.map(t =>
-            succeededIds.includes(t.id) ? { ...t, isDirty: false } : t
-          ));
+          .map(r => (r as PromiseFulfilledResult<{ tab: Tab; writtenHtml: string; ok: true }>).value);
+        if (successes.length > 0) {
+          const next = tabsRef.current.map(t => {
+            const match = successes.find(s => s.tab.id === t.id);
+            if (match && getTabContent(t) === match.writtenHtml) {
+              return { ...t, isDirty: false };
+            }
+            return t;
+          });
+          tabsRef.current = next;
+          setTabs(next);
         }
       });
     }).then(fn => {
@@ -689,13 +425,13 @@ function App() {
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
 
-  const checkTabScroll = () => {
+  const checkTabScroll = useCallback(() => {
     const elem = tabsWrapperRef.current;
     if (!elem) return;
     const hasOverflow = elem.scrollWidth > elem.clientWidth + 2;
     setCanScrollLeft(hasOverflow && elem.scrollLeft > 2);
     setCanScrollRight(hasOverflow && elem.scrollLeft + elem.clientWidth < elem.scrollWidth - 2);
-  };
+  }, []);
 
   useEffect(() => {
     checkTabScroll();
@@ -706,7 +442,9 @@ function App() {
   const [chars, setChars] = useState(0);
   const [selectedWords, setSelectedWords] = useState(0); // For the selection count
   const [replaceTerm, setReplaceTerm] = useState('');
-  const [recentFiles, setRecentFiles] = useState<string[]>([]); // For recent files
+  const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  const recentFilesRef = useRef<string[]>(recentFiles);
+  useEffect(() => { recentFilesRef.current = recentFiles; }, [recentFiles]);
   const [showRecentModal, setShowRecentModal] = useState(false);
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
   const [tabToClose, setTabToClose] = useState<string | null>(null);
@@ -739,7 +477,26 @@ function App() {
 
   const [showSearch, setShowSearch] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [zoomLevel, setZoomLevel] = useState(100);
+  const [zoomLevel, setZoomLevel] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('noting_zoom_level');
+      if (saved !== null) {
+        const n = Number(JSON.parse(saved));
+        return Number.isFinite(n) ? Math.max(20, Math.min(300, n)) : 100;
+      }
+      return 100;
+    } catch {
+      return 100;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('noting_zoom_level', JSON.stringify(zoomLevel));
+    } catch (e) {
+      console.error('Failed to save zoom level', e);
+    }
+  }, [zoomLevel]);
   const [showGoToLine, setShowGoToLine] = useState(false);
   const [lineNumber, setLineNumber] = useState('');
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null);
@@ -963,17 +720,6 @@ function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const findBoxRef = useRef<HTMLDivElement>(null);
 
-  // Update the global dirty check (around line 105)
-  const hasDirtyTabsRef = useRef(false);
-  useEffect(() => {
-    hasDirtyTabsRef.current = tabs.some(t => {
-      if (!t.isDirty) return false;
-      // If it's dirty but it's a completely untouched new file, safely ignore it
-      if (isEmptyUntitledTab(t, editorRef.current, activeTabIdRef.current)) return false;
-      return true;
-    });
-  }, [tabs]);
-
   // 2. THE STRICT-MODE SAFE INTERCEPTOR
   useEffect(() => {
     let cancelled = false;
@@ -983,7 +729,7 @@ function App() {
       flushSessionSave(); // flush first, unconditionally
       if (isForceClosingRef.current) return;
 
-      if (hasDirtyTabsRef.current) {
+      if (tabsRef.current.some(checkTabDirty)) {
         event.preventDefault(); // Stop the native OS close
         
         // Pull to front safely
@@ -1005,17 +751,21 @@ function App() {
       cancelled = true;
       unlisten?.();
     };
-  }, [flushSessionSave, appWindow]);
+  }, [flushSessionSave, appWindow, checkTabDirty]);
 
   /* --- FEATURE: SESSION RESTORE & RECENT FILES ON BOOT --- */
   useEffect(() => {
+    let cancelled = false;
     const bootSession = async () => {
       // Load recent files
       const savedRecents = localStorage.getItem('noting_recents');
       if (savedRecents) {
         try {
           const parsed = JSON.parse(savedRecents);
-          if (Array.isArray(parsed)) setRecentFiles(parsed);
+          if (Array.isArray(parsed)) {
+            recentFilesRef.current = parsed;
+            setRecentFiles(parsed);
+          }
         } catch (e) {
           try { localStorage.removeItem('noting_recents'); } catch {}
         }
@@ -1038,7 +788,7 @@ function App() {
                   restoredTabs.push({
                     id: tabId,
                     title: item.title || 'Untitled',
-                    content: DOMPurify.sanitize(item.content, PURIFY_CONFIG), // defence in depth
+                    content: DOMPurify.sanitize(item.content, PURIFY_CONFIG),
                     path: item.path,
                     isDirty: true,
                     isPinned: item.isPinned,
@@ -1046,7 +796,9 @@ function App() {
                 } else {
                   try {
                     const rawText = await readTextFile(item.path);
-                    const content = await parseFileContent(rawText);
+                    const content = isTxtFile(item.path)
+                      ? textToHtml(rawText)
+                      : await parseFileContent(rawText);
                     restoredTabs.push({
                       id: tabId,
                       title: item.title,
@@ -1079,13 +831,18 @@ function App() {
                 });
               }
             }
+            if (cancelled) return;
             if (restoredTabs.length > 0) {
               restoredTabs.sort((a, b) => (a.isPinned === b.isPinned) ? 0 : a.isPinned ? -1 : 1);
+              tabsRef.current = restoredTabs;
               setTabs(restoredTabs);
               const savedActiveIndex = Array.isArray(parsedSession) ? 0 : (parsedSession?.activeTabIndex ?? 0);
               const targetActiveId = restoredTabs.find(t => t.id === savedActiveId)?.id
                 ?? restoredTabs[Math.min(savedActiveIndex, restoredTabs.length - 1)].id;
+              activeTabIdRef.current = targetActiveId;
               setActiveTabId(targetActiveId);
+              const activeRestoredTab = restoredTabs.find(t => t.id === targetActiveId) ?? restoredTabs[0];
+              setMinimapContent(activeRestoredTab.content);
             }
           }
         } catch (e) {
@@ -1095,6 +852,7 @@ function App() {
       }
     };
     bootSession();
+    return () => { cancelled = true; };
   }, []);
 
   const forceCloseApp = useCallback(() => {
@@ -1142,7 +900,14 @@ function App() {
       AutoExponent,
       MathSpacing,
       MathEngine,
-      StarterKit.configure({ italic: false }),
+      StarterKit.configure({
+        italic: false,
+        link: {
+          openOnClick: false,
+          autolink: true,
+          HTMLAttributes: { rel: 'noopener noreferrer' },
+        },
+      }),
       CustomItalic,
       Placeholder.configure({ placeholder: 'Start writing...' }), 
       CharacterCount,
@@ -1150,7 +915,19 @@ function App() {
     ],
 
     content: activeTab.content,
-    editorProps: { attributes: { class: 'notepad', spellcheck: 'false' } },
+    editorProps: {
+      attributes: { class: 'notepad', spellcheck: 'false' },
+      handleClick: (_view, _pos, event) => {
+        const a = (event.target as HTMLElement).closest('a[href]');
+        if (!a) return false;
+        event.preventDefault();
+        const href = a.getAttribute('href');
+        if (href?.startsWith('https://') || href?.startsWith('http://') || href?.startsWith('mailto:')) {
+          import('@tauri-apps/plugin-opener').then(m => m.openUrl(href).catch(() => {}));
+        }
+        return true;
+      },
+    },
     onCreate({ editor }) {
       updatePlaceholderVisibility(editor);
     },
@@ -1173,6 +950,31 @@ function App() {
       contentMapRef.current.set(currentTabId, newContent);
       setWords(editor.storage.characterCount.words());
       setChars(editor.storage.characterCount.characters());
+
+      // Minimap throttle (100ms leading-schedule)
+      if (minimapTimerRef.current === null) {
+        minimapTimerRef.current = setTimeout(() => {
+          minimapTimerRef.current = null;
+          if (activeTabIdRef.current === currentTabId) {
+            setMinimapContent(contentMapRef.current.get(currentTabId) ?? newContent);
+          }
+        }, 100);
+      }
+
+      // Real-time title rAF (unattached untitled tabs only)
+      if (titleRafRef.current !== null) cancelAnimationFrame(titleRafRef.current);
+      titleRafRef.current = requestAnimationFrame(() => {
+        titleRafRef.current = null;
+        if (activeTabIdRef.current !== currentTabId) return;
+        const cur = tabsRef.current.find(t => t.id === currentTabId);
+        if (!cur || cur.path) return;
+        const newTitle = titleFromEditor(editor);
+        if (cur.title !== newTitle) {
+          const next = tabsRef.current.map(t => t.id === currentTabId ? { ...t, title: newTitle } : t);
+          tabsRef.current = next;
+          setTabs(next);
+        }
+      });
       
       if (transaction.docChanged && editor.isFocused) {
         if (isProgrammaticChangeRef.current) return;
@@ -1185,12 +987,13 @@ function App() {
 
         debouncedSetTabsTimer.current = setTimeout(() => {
           debouncedSetTabsTimer.current = null;
+          if (activeTabIdRef.current !== currentTabId) return;
           const currentEditor = editorRef.current;
           if (!currentEditor) return;
-          const safeTitle = titleFromText(currentEditor.getText());
+          const safeTitle = titleFromEditor(currentEditor);
           const latestContent = contentMapRef.current.get(currentTabId) ?? newContent;
 
-          setTabs(prev => prev.map(t => {
+          const next = tabsRef.current.map(t => {
             if (t.id === currentTabId) {
               const isActuallyDirty = !(!t.path && currentEditor.isEmpty);
               const titleToUse = t.path 
@@ -1199,7 +1002,9 @@ function App() {
               return { ...t, content: latestContent, isDirty: isActuallyDirty, title: titleToUse };
             }
             return t;
-          }));
+          });
+          tabsRef.current = next;
+          setTabs(next);
         }, 250);
       }
     },
@@ -1294,58 +1099,68 @@ function App() {
   }, [showMinimap, wordWrap, zoomLevel, editor]);
 
   const addTab = useCallback((title = 'Untitled', content = '', path?: string) => {
+    flushDebouncedTabs();
     const newId = createTabId();
-    setTabs(prev => [...prev, { id: newId, title, content, path, isDirty: false }]);
+    const next = [...tabsRef.current, { id: newId, title, content, path, isDirty: false }];
+    tabsRef.current = next;
+    setTabs(next);
+    activeTabIdRef.current = newId;
     setActiveTabId(newId);
+    contentMapRef.current.set(newId, content);
+    setMinimapContent(content);
     setTimeout(() => {
       document.querySelector('.add-tab-container')?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
       checkTabScroll();
     }, 50);
-  }, []);
+  }, [flushDebouncedTabs, checkTabScroll]);
 
   /* --- TOGGLE PIN STATUS --- */
   const togglePin = useCallback((id: string) => {
-    setTabs(prev => {
-      const next = prev.map(t => t.id === id ? { ...t, isPinned: !t.isPinned } : t);
-      // Automatically sorts tabs so pinned ones stay safely on the left!
-      return next.sort((a, b) => (a.isPinned === b.isPinned) ? 0 : a.isPinned ? -1 : 1);
-    });
+    const next = tabsRef.current.map(t => t.id === id ? { ...t, isPinned: !t.isPinned } : t);
+    next.sort((a, b) => (a.isPinned === b.isPinned) ? 0 : a.isPinned ? -1 : 1);
+    tabsRef.current = next;
+    setTabs(next);
   }, []);
 
   /* --- TAB DRAG (mouse-based, works in Tauri) --- */
-  const handleTabMouseDown = (e: React.MouseEvent, id: string) => {
+  const handleTabMouseDown = useCallback((e: React.MouseEvent, id: string) => {
     if (e.button !== 0) return; // left button only
     // Don't start a drag if they clicked the × button
     if ((e.target as HTMLElement).classList.contains('tab-close')) return;
     e.preventDefault();
     switchTab(id);
     setDraggedTabId(id);
-  };
+  }, [switchTab]);
 
-  const handleTabMouseEnter = (id: string) => {
+  const handleTabMouseEnter = useCallback((id: string) => {
     if (!draggedTabId) return;
     if (id === draggedTabId) {
       setDragOverTabId(null);
     } else {
       setDragOverTabId(id);
     }
-  };
+  }, [draggedTabId]);
 
   // Global mouseup — finalise or cancel the drag
   useEffect(() => {
     const onMouseUp = () => {
-      if (draggedTabId && dragOverTabId && draggedTabId !== dragOverTabId) {
-        setTabs(prev => {
-          const next = [...prev];
-          const from = next.findIndex(t => t.id === draggedTabId);
-          const to   = next.findIndex(t => t.id === dragOverTabId);
+      try {
+        if (draggedTabId && dragOverTabId && draggedTabId !== dragOverTabId) {
+          const tabs = tabsRef.current;
+          const from = tabs.findIndex(t => t.id === draggedTabId);
+          const to   = tabs.findIndex(t => t.id === dragOverTabId);
+          if (from === -1 || to === -1) return;
+          if (tabs[from].isPinned !== tabs[to].isPinned) return;
+          const next = [...tabs];
           const [moved] = next.splice(from, 1);
           next.splice(to, 0, moved);
-          return next;
-        });
+          tabsRef.current = next;
+          setTabs(next);
+        }
+      } finally {
+        setDraggedTabId(null);
+        setDragOverTabId(null);
       }
-      setDraggedTabId(null);
-      setDragOverTabId(null);
     };
     window.addEventListener('mouseup', onMouseUp);
     return () => window.removeEventListener('mouseup', onMouseUp);
@@ -1354,57 +1169,60 @@ function App() {
   /* --- 1. TAB & APP CLOSING --- */
   const executeCloseTab = useCallback((id: string) => {
     flushDebouncedTabs();
-    setTabs(prev => {
-      if (prev.length <= 1) {
-        const newId = createTabId();
-        setActiveTabId(newId);
-        return [{ id: newId, title: 'Untitled', content: '', isDirty: false }];
-      }
-      const closedIndex = prev.findIndex(t => t.id === id);
-      const nextTabs = prev.filter(t => t.id !== id);
-      if (activeTabIdRef.current === id) {
-        const nextIndex = Math.min(closedIndex, nextTabs.length - 1);
-        setActiveTabId(nextTabs[Math.max(0, nextIndex)].id);
-      }
-      return nextTabs;
-    });
+    if (tabsRef.current.length <= 1) {
+      const newId = createTabId();
+      activeTabIdRef.current = newId;
+      setActiveTabId(newId);
+      const next = [{ id: newId, title: 'Untitled', content: '', isDirty: false }];
+      tabsRef.current = next;
+      setTabs(next);
+      setTabToClose(null);
+      setMinimapContent('');
+      return;
+    }
+    const closedIndex = tabsRef.current.findIndex(t => t.id === id);
+    const nextTabs = tabsRef.current.filter(t => t.id !== id);
+    if (activeTabIdRef.current === id) {
+      const nextIndex = Math.min(closedIndex, nextTabs.length - 1);
+      const nextActiveId = nextTabs[Math.max(0, nextIndex)].id;
+      activeTabIdRef.current = nextActiveId;
+      setActiveTabId(nextActiveId);
+      setMinimapContent(contentMapRef.current.get(nextActiveId) ?? '');
+    }
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
     setTabToClose(null); 
   }, [flushDebouncedTabs]);
 
   const requestCloseTab = useCallback((e: React.MouseEvent, id: string) => {
     e.stopPropagation();
+    flushDebouncedTabs();
     const tab = tabsRef.current.find(t => t.id === id);
-    
-    if (tab?.isDirty) {
-      const isEmptyNewFile = isEmptyUntitledTab(tab, editorRef.current, activeTabIdRef.current);
-      if (isEmptyNewFile) {
-        executeCloseTab(id); // Safe to close empty, unsaved tabs
-      } else {
-        setTabToClose(id); // Must prompt to save!
-      }
+    if (tab && checkTabDirty(tab)) {
+      setTabToClose(id);
     } else {
       executeCloseTab(id);
     }
-  }, [executeCloseTab]);
+  }, [executeCloseTab, checkTabDirty, flushDebouncedTabs]);
 
-  const requestAppClose = () => {
-    if (hasDirtyTabsRef.current) {
+  const requestAppClose = useCallback(() => {
+    flushDebouncedTabs();
+    if (tabsRef.current.some(checkTabDirty)) {
       setShowQuitPrompt(true);
     } else {
       forceCloseApp();
     }
-  };
+  }, [checkTabDirty, forceCloseApp, flushDebouncedTabs]);
 
   const addToRecentFiles = useCallback((path: string) => {
-    setRecentFiles(prev => {
-      const updated = [path, ...prev.filter(p => p !== path)].slice(0, 10);
-      try {
-        localStorage.setItem('noting_recents', JSON.stringify(updated));
-      } catch (e) {
-        console.error('Failed to save recents to localStorage', e);
-      }
-      return updated;
-    });
+    const updated = [path, ...recentFilesRef.current.filter(p => p !== path)].slice(0, 10);
+    recentFilesRef.current = updated;
+    setRecentFiles(updated);
+    try {
+      localStorage.setItem('noting_recents', JSON.stringify(updated));
+    } catch (e) {
+      console.error('Failed to save recents to localStorage', e);
+    }
   }, []);
 
   const openFileInTab = useCallback(async (path: string): Promise<boolean> => {
@@ -1417,19 +1235,23 @@ function App() {
 
     try {
       const rawText = await readTextFile(path);
-      const htmlContent = await parseFileContent(rawText);
+      const htmlContent = isTxtFile(path) ? textToHtml(rawText) : await parseFileContent(rawText);
       const fileName = titleFromPath(path);
 
-      if (isBlankUnsavedTab(activeTabRef.current, editorRef.current, activeTabIdRef.current)) {
+      if (isBlankUnsavedTab(getActiveTab(), editorRef.current, activeTabIdRef.current)) {
         const currentActiveId = activeTabIdRef.current;
-        setTabs(prev => prev.map(t =>
+        const next = tabsRef.current.map(t =>
           t.id === currentActiveId
             ? { ...t, title: fileName, content: htmlContent, path, isDirty: false }
             : t
-        ));
+        );
+        tabsRef.current = next;
+        setTabs(next);
+        contentMapRef.current.set(currentActiveId, htmlContent);
         isProgrammaticChangeRef.current = true;
         editorRef.current?.commands.setContent(htmlContent);
         isProgrammaticChangeRef.current = false;
+        setMinimapContent(htmlContent);
       } else {
         addTab(fileName, htmlContent, path);
       }
@@ -1439,10 +1261,13 @@ function App() {
     } catch (e) {
       console.error('Could not open file:', e);
       showToast("Could not open file. It may have been moved, deleted, or permission was denied.", "error");
-      setRecentFiles(prev => prev.filter(p => p !== path));
+      const updated = recentFilesRef.current.filter(p => p !== path);
+      recentFilesRef.current = updated;
+      setRecentFiles(updated);
+      try { localStorage.setItem('noting_recents', JSON.stringify(updated)); } catch {}
       return false;
     }
-  }, [addTab, addToRecentFiles, showToast, switchTab]);
+  }, [addTab, addToRecentFiles, getActiveTab, showToast, switchTab]);
 
   const handleOpen = useCallback(async () => {
     try {
@@ -1460,6 +1285,7 @@ function App() {
   }, [openFileInTab, showToast]);
 
   const handleSaveFromModal = useCallback(async () => {
+    flushDebouncedTabs();
     if (!editorRef.current || !tabToClose) return;
     const tab = tabsRef.current.find(t => t.id === tabToClose);
     if (!tab) return;
@@ -1470,8 +1296,9 @@ function App() {
         filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
       });
       if (path) {
-        const htmlToSave = tab.id === activeTabIdRef.current ? editorRef.current.getHTML() : tab.content;
-        await writeTextFile(path, getMarkdown(htmlToSave));
+        const htmlToSave = getTabContent(tab);
+        const payload = isTxtFile(path) ? htmlToText(htmlToSave) : getMarkdown(htmlToSave);
+        await writeTextFile(path, payload);
         executeCloseTab(tabToClose);
         addToRecentFiles(path);
       } else {
@@ -1482,12 +1309,12 @@ function App() {
       showToast('Failed to save file.', 'error');
       setTabToClose(null);
     }
-  }, [tabToClose, executeCloseTab, addToRecentFiles, showToast]);
+  }, [tabToClose, executeCloseTab, addToRecentFiles, showToast, flushDebouncedTabs, getTabContent]);
 
   const handleSave = useCallback(async () => {
     flushDebouncedTabs();
     if (!editorRef.current) return;
-    const currentTab = activeTabRef.current;
+    const currentTab = getActiveTab();
     const suggestedName = suggestedFileName(currentTab.title);
     try {
       const path = currentTab.path || await save({
@@ -1495,22 +1322,25 @@ function App() {
         filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
       });
       if (path) {
-        await writeTextFile(path, getMarkdown(editorRef.current.getHTML()));
+        const payload = isTxtFile(path) ? htmlToText(editorRef.current.getHTML()) : getMarkdown(editorRef.current.getHTML());
+        await writeTextFile(path, payload);
         const fileName = titleFromPath(path, suggestedName);
         const currentId = activeTabIdRef.current;
-        setTabs(prev => prev.map(t => t.id === currentId ? { ...t, path, title: fileName, isDirty: false } : t));
+        const next = tabsRef.current.map(t => t.id === currentId ? { ...t, path, title: fileName, isDirty: false } : t);
+        tabsRef.current = next;
+        setTabs(next);
         addToRecentFiles(path);
       }
     } catch (e) {
       console.error('Save failed:', e);
       showToast('Failed to save file.', 'error');
     }
-  }, [addToRecentFiles, showToast, flushDebouncedTabs]);
+  }, [addToRecentFiles, getActiveTab, showToast, flushDebouncedTabs]);
 
   const handleSaveAs = useCallback(async () => {
     flushDebouncedTabs();
     if (!editorRef.current) return;
-    const currentTab = activeTabRef.current;
+    const currentTab = getActiveTab();
     const suggestedName = suggestedFileName(currentTab.title);
     try {
       const path = await save({
@@ -1518,21 +1348,22 @@ function App() {
         filters: [{ name: 'Text Files', extensions: ['txt', 'md'] }],
       });
       if (path) {
-        await writeTextFile(path, getMarkdown(editorRef.current.getHTML()));
+        const payload = isTxtFile(path) ? htmlToText(editorRef.current.getHTML()) : getMarkdown(editorRef.current.getHTML());
+        await writeTextFile(path, payload);
         const fileName = titleFromPath(path, suggestedName);
         const currentId = activeTabIdRef.current;
-        setTabs(prev => prev.map(t => t.id === currentId ? { ...t, path, title: fileName, isDirty: false } : t));
+        const next = tabsRef.current.map(t => t.id === currentId ? { ...t, path, title: fileName, isDirty: false } : t);
+        tabsRef.current = next;
+        setTabs(next);
         addToRecentFiles(path);
       }
     } catch (e) {
       console.error('Save As failed:', e);
       showToast('Failed to save file.', 'error');
     }
-  }, [addToRecentFiles, showToast, flushDebouncedTabs]);
+  }, [addToRecentFiles, getActiveTab, showToast, flushDebouncedTabs]);
 
-
-
-  const executeGoToLine = () => {
+    const executeGoToLine = () => {
     const line = parseInt(lineNumber);
     if (!editor || isNaN(line) || line < 1) {
       setShowGoToLine(false);
@@ -1562,7 +1393,7 @@ function App() {
     setLineNumber('');
   };
 
-  const scrollToCurrentMatch = () => {
+  const scrollToCurrentMatch = useCallback(() => {
     // A tiny delay gives Tiptap time to apply the CSS class before we look for it
     setTimeout(() => {
       const activeMatch = document.querySelector('.search-match-current');
@@ -1570,60 +1401,57 @@ function App() {
         activeMatch.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }, 10);
-  };
+  }, []);
 
   /* --- 1. KEYBOARD & MOUSE SHORTCUTS --- */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key === 's') {
+      const keyLower = e.key.toLowerCase();
+      if (e.ctrlKey && keyLower === 's' && !e.shiftKey) {
         e.preventDefault();
         handleSave();
-      } else if (e.ctrlKey && e.key === 'o') {
+      } else if (e.ctrlKey && keyLower === 's' && e.shiftKey) {
+        e.preventDefault();
+        handleSaveAs();
+      } else if (e.ctrlKey && keyLower === 'o') {
         e.preventDefault();
         handleOpen();
-      } 
-      // 1. FIXED Ctrl+N: Now safely opens a new tab instead of wiping the current one!
-      else if (e.ctrlKey && e.key === 'n') {
+      } else if (e.ctrlKey && keyLower === 'n') {
         e.preventDefault();
         addTab();
-      } 
-      // 2. NEW Ctrl+T: Standard browser shortcut for a new tab
-      else if (e.ctrlKey && e.key === 't') {
+      } else if (e.ctrlKey && keyLower === 't') {
         e.preventDefault();
         addTab();
-      } 
-      // 3. NEW Ctrl+W: Safely closes the active tab (will still prompt to save if dirty!)
-      else if (e.ctrlKey && e.key === 'w') {
+      } else if (e.ctrlKey && keyLower === 'w') {
         e.preventDefault();
-        // Passes a dummy event so the stopPropagation doesn't crash
-        requestCloseTab({ stopPropagation: () => {} } as any, activeTabId);
-      } 
-      // ... Ctrl+Tab logic continues here ...
-      else if (e.ctrlKey && e.key === 'Tab') {
+        requestCloseTab({ stopPropagation: () => {} } as any, activeTabIdRef.current);
+      } else if (e.ctrlKey && e.key === 'Tab') {
         e.preventDefault();
-        const currentIndex = tabs.findIndex(t => t.id === activeTabId);
+        const currentTabs = tabsRef.current;
+        const currentActiveId = activeTabIdRef.current;
+        const currentIndex = currentTabs.findIndex(t => t.id === currentActiveId);
         const nextIndex = e.shiftKey
-          ? (currentIndex - 1 + tabs.length) % tabs.length
-          : (currentIndex + 1) % tabs.length;
-        switchTab(tabs[nextIndex].id);
-      } else if (e.ctrlKey && e.key === 'f') {
+          ? (currentIndex - 1 + currentTabs.length) % currentTabs.length
+          : (currentIndex + 1) % currentTabs.length;
+        switchTab(currentTabs[nextIndex].id);
+      } else if (e.ctrlKey && keyLower === 'f') {
         e.preventDefault(); 
         setShowSearch(true);
         editor?.chain().setSearchTerm(searchTerm).run();
-      } else if (e.ctrlKey && e.key === 'g') {
+      } else if (e.ctrlKey && keyLower === 'g') {
         e.preventDefault();
         setShowGoToLine(true);
-        } else if (e.ctrlKey && (e.key === 'm' || e.key === 'M')) {
+      } else if (e.ctrlKey && keyLower === 'm') {
         e.preventDefault();
         setShowMinimap((prev: boolean) => !prev);
-        } else if (e.ctrlKey && e.key === 'p') {
+      } else if (e.ctrlKey && keyLower === 'p') {
         e.preventDefault();
-        window.print(); // Triggers the OS "Save as PDF" dialog natively
+        window.print();
       } else if (e.key === 'F3' || e.code === 'F3') {
         e.preventDefault();
         if (!showSearch) {
           setShowSearch(true);
-          editor?.chain().setSearchTerm(searchTerm).run(); // Brings highlights back!
+          editor?.chain().setSearchTerm(searchTerm).run();
         } else {
           if (e.shiftKey) {
             editor?.chain().previousSearchResult().run();
@@ -1640,13 +1468,10 @@ function App() {
           return;
         }
         setShowSearch(false);
-        editor?.chain().setSearchTerm('').run(); // Hides the highlights!
-        
-        // NEW: Unselects any highlighted text by collapsing the cursor to the end
+        editor?.chain().setSearchTerm('').run();
         if (editor && !editor.state.selection.empty) {
           editor.commands.setTextSelection(editor.state.selection.to);
         }
-        
         editor?.commands.focus();
       } else if (e.key === 'F5') {
         e.preventDefault();
@@ -1680,18 +1505,17 @@ function App() {
       window.removeEventListener('wheel', handleWheel);
     };
   }, [
-    activeTab,
-    tabs,
-    activeTabId,
     editor,
     showSearch,
     searchTerm,
     draggedTabId,
     handleSave,
+    handleSaveAs,
     handleOpen,
     addTab,
     requestCloseTab,
     switchTab,
+    scrollToCurrentMatch,
   ]);
 
   /* --- 2. CONTEXT MENU LISTENER --- */
@@ -1720,7 +1544,7 @@ function App() {
   }, []);
 
   /* --- FEATURE: MINIMAP SCROLL SYNC (Real-Time & Scale-Corrected) --- */
-  const handleEditorScroll = (e?: React.UIEvent<HTMLDivElement>) => {
+  const handleEditorScroll = useCallback((e?: React.UIEvent<HTMLDivElement>) => {
     const editorElem = (e?.currentTarget as HTMLDivElement) || (document.querySelector('.editor-container') as HTMLDivElement);
     if (!editorElem || !minimapContentRef.current || !minimapViewportRef.current) return;
 
@@ -1774,10 +1598,10 @@ function App() {
     const translateY = contentVisualTopRelativeToViewport / scale;
 
     minimapContentRef.current.style.transform = `scale(${scale}) translateY(${translateY}px)`;
-  };
+  }, [wordWrap, zoomLevel]);
 
   /* --- FEATURE: DRAGGABLE MINIMAP (No-Teleport Version) --- */
-  const handleMinimapMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handleMinimapMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.stopPropagation();
     const editorElem = document.querySelector('.editor-container') as HTMLDivElement;
@@ -1835,9 +1659,9 @@ function App() {
     dragRef.current = { onMove: onMouseMove, onUp: onMouseUp };
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
-  };
+  }, [handleEditorScroll]);
 
-  const handleMinimapTrackMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+  const handleMinimapTrackMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (e.target !== e.currentTarget) return;
     const editorElem = document.querySelector('.editor-container') as HTMLDivElement;
     if (!editorElem) return;
@@ -1848,22 +1672,22 @@ function App() {
     if (scrollable > 0) {
       editorElem.scrollTop = clickPercent * scrollable;
     }
-  };
+  }, []);
 
   // Triggers the scroll math every time you type so the highlight box dynamically resizes!
   useEffect(() => {
     handleEditorScroll();
-  }, [activeTab.content, zoomLevel, wordWrap, showMinimap]);
+  }, [minimapContent, zoomLevel, wordWrap, showMinimap, handleEditorScroll]);
 
   const handleScrollTabsLeft = useCallback(() => {
     tabsWrapperRef.current?.scrollBy({ left: -180, behavior: 'smooth' });
     setTimeout(checkTabScroll, 200);
-  }, []);
+  }, [checkTabScroll]);
 
   const handleScrollTabsRight = useCallback(() => {
     tabsWrapperRef.current?.scrollBy({ left: 180, behavior: 'smooth' });
     setTimeout(checkTabScroll, 200);
-  }, []);
+  }, [checkTabScroll]);
 
   const handleTabContextMenu = useCallback((e: React.MouseEvent, tabId: string) => {
     e.preventDefault();
@@ -1879,11 +1703,11 @@ function App() {
     const storage = (editorRef.current?.storage as any)?.searchAndReplace;
     const match = storage?.results?.[storage?.resultIndex];
     if (match && editorRef.current) {
-      editorRef.current.chain().focus().insertContentAt({ from: match.from, to: match.to }, replaceTerm).run();
+      editorRef.current.chain().focus().insertContentAt({ from: match.from, to: match.to }, { type: 'text', text: replaceTerm }).run();
       editorRef.current.chain().setSearchTerm(searchTerm).run();
       scrollToCurrentMatch();
     }
-  }, [searchTerm, replaceTerm]);
+  }, [searchTerm, replaceTerm, scrollToCurrentMatch]);
 
   const handleReplaceAll = useCallback(() => {
     if (editorRef.current) {
@@ -1891,10 +1715,86 @@ function App() {
       editorRef.current.chain().setSearchTerm(searchTerm).run();
       scrollToCurrentMatch();
     }
-  }, [searchTerm]);
+  }, [searchTerm, scrollToCurrentMatch]);
+
+  const handleAddTab = useCallback(() => {
+    addTab();
+  }, [addTab]);
+
+  const handleMinimize = useCallback(() => {
+    appWindow.minimize();
+  }, [appWindow]);
+
+  const handleMaximize = useCallback(() => {
+    appWindow.toggleMaximize();
+  }, [appWindow]);
+
+  const handleShowRecent = useCallback(() => {
+    setShowRecentModal(true);
+  }, []);
+
+  const handleExportPdf = useCallback(() => {
+    window.print();
+  }, []);
+
+  const handleToggleWordWrap = useCallback(() => {
+    setWordWrap(prev => !prev);
+  }, []);
+
+  const handleToggleMinimap = useCallback(() => {
+    setShowMinimap(prev => !prev);
+  }, []);
+
+  const handleToggleBold = useCallback(() => {
+    editor?.chain().focus().toggleBold().run();
+  }, [editor]);
+
+  const handleToggleItalic = useCallback(() => {
+    editor?.chain().focus().toggleItalic().run();
+  }, [editor]);
+
+  const handleToggleAnimation = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setIsAnimating(prev => !prev);
+  }, []);
+
+  const handleSearchChange = useCallback((val: string) => {
+    setSearchTerm(val);
+    editor?.chain().setSearchTerm(val).run();
+    scrollToCurrentMatch();
+  }, [editor, scrollToCurrentMatch]);
+
+  const handleReplaceChange = useCallback((val: string) => {
+    setReplaceTerm(val);
+    editor?.chain().setReplaceTerm(val).run();
+  }, [editor]);
+
+  const handlePreviousMatch = useCallback(() => {
+    editor?.chain().previousSearchResult().run();
+    scrollToCurrentMatch();
+  }, [editor, scrollToCurrentMatch]);
+
+  const handleNextMatch = useCallback(() => {
+    editor?.chain().nextSearchResult().run();
+    scrollToCurrentMatch();
+  }, [editor, scrollToCurrentMatch]);
+
+  const handleCloseSearch = useCallback(() => {
+    setShowSearch(false);
+    setSearchTerm('');
+    setReplaceTerm('');
+    editor?.chain().setSearchTerm('').run();
+    editor?.commands.focus();
+  }, [editor]);
+
+  const handleClearTerms = useCallback(() => {
+    setSearchTerm('');
+    setReplaceTerm('');
+    editor?.chain().setSearchTerm('').run();
+  }, [editor]);
 
   return (
-    <div className={`app-container ${!showMinimap ? 'hide-minimap' : ''}`}>
+    <div className={`app-container ${!showMinimap ? 'hide-minimap' : ''} ${!wordWrap ? 'no-wrap' : ''}`}>
       <TabBar
         tabs={tabs}
         activeTabId={activeTabId}
@@ -1912,9 +1812,9 @@ function App() {
         onTabMouseLeave={handleTabMouseLeave}
         onTabContextMenu={handleTabContextMenu}
         onCloseTab={requestCloseTab}
-        onAddTab={() => addTab()}
-        onMinimize={() => appWindow.minimize()}
-        onMaximize={() => appWindow.toggleMaximize()}
+        onAddTab={handleAddTab}
+        onMinimize={handleMinimize}
+        onMaximize={handleMaximize}
         onCloseApp={requestAppClose}
       />
 
@@ -1926,20 +1826,17 @@ function App() {
         dot1Ref={dot1Ref}
         dot2Ref={dot2Ref}
         dot3Ref={dot3Ref}
-        onNewTab={() => addTab()}
+        onNewTab={handleAddTab}
         onOpen={handleOpen}
-        onShowRecent={() => setShowRecentModal(true)}
+        onShowRecent={handleShowRecent}
         onSave={handleSave}
         onSaveAs={handleSaveAs}
-        onExportPdf={() => window.print()}
-        onToggleWordWrap={() => setWordWrap(prev => !prev)}
-        onToggleMinimap={() => setShowMinimap(prev => !prev)}
-        onToggleBold={() => editor?.chain().focus().toggleBold().run()}
-        onToggleItalic={() => editor?.chain().focus().toggleItalic().run()}
-        onToggleAnimation={(e) => {
-          e.stopPropagation();
-          setIsAnimating(prev => !prev);
-        }}
+        onExportPdf={handleExportPdf}
+        onToggleWordWrap={handleToggleWordWrap}
+        onToggleMinimap={handleToggleMinimap}
+        onToggleBold={handleToggleBold}
+        onToggleItalic={handleToggleItalic}
+        onToggleAnimation={handleToggleAnimation}
       />
 
       <div className="workspace-container">
@@ -1954,37 +1851,14 @@ function App() {
           }
           findBoxRef={findBoxRef}
           searchInputRef={searchInputRef}
-          onSearchChange={(val) => {
-            setSearchTerm(val);
-            editor?.chain().setSearchTerm(val).run();
-            scrollToCurrentMatch();
-          }}
-          onReplaceChange={(val) => {
-            setReplaceTerm(val);
-            editor?.chain().setReplaceTerm(val).run();
-          }}
-          onPreviousMatch={() => {
-            editor?.chain().previousSearchResult().run();
-            scrollToCurrentMatch();
-          }}
-          onNextMatch={() => {
-            editor?.chain().nextSearchResult().run();
-            scrollToCurrentMatch();
-          }}
+          onSearchChange={handleSearchChange}
+          onReplaceChange={handleReplaceChange}
+          onPreviousMatch={handlePreviousMatch}
+          onNextMatch={handleNextMatch}
           onReplaceCurrent={handleReplaceCurrent}
           onReplaceAll={handleReplaceAll}
-          onClose={() => {
-            setShowSearch(false);
-            setSearchTerm('');
-            setReplaceTerm('');
-            editor?.chain().setSearchTerm('').run();
-            editor?.commands.focus();
-          }}
-          onClearTerms={() => {
-            setSearchTerm('');
-            setReplaceTerm('');
-            editor?.chain().setSearchTerm('').run();
-          }}
+          onClose={handleCloseSearch}
+          onClearTerms={handleClearTerms}
         />
 
         <EditorPane
@@ -1995,7 +1869,7 @@ function App() {
         />
 
         <Minimap
-          content={activeTab.content}
+          content={minimapContent}
           minimapViewportRef={minimapViewportRef}
           minimapContentRef={minimapContentRef}
           onTrackMouseDown={handleMinimapTrackMouseDown}
@@ -2037,7 +1911,10 @@ function App() {
             if (success) setShowRecentModal(false);
           } catch (e) {
             showToast("Could not open file.", "error");
-            setRecentFiles(prev => prev.filter(p => p !== path));
+            const updated = recentFilesRef.current.filter(p => p !== path);
+            recentFilesRef.current = updated;
+            setRecentFiles(updated);
+            try { localStorage.setItem('noting_recents', JSON.stringify(updated)); } catch {}
           }
         }}
         onClose={() => setShowRecentModal(false)}
@@ -2046,19 +1923,26 @@ function App() {
       <ContextMenu
         pos={contextMenu}
         onCut={async () => {
-          const selectedText = editor?.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to);
+          const selectedText = editor?.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, '\n\n', '\n');
           if (selectedText) {
             await writeText(selectedText);
             editor?.chain().focus().deleteSelection().run();
           }
         }}
         onCopy={async () => {
-          const selectedText = editor?.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to);
+          const selectedText = editor?.state.doc.textBetween(editor.state.selection.from, editor.state.selection.to, '\n\n', '\n');
           if (selectedText) await writeText(selectedText);
         }}
         onPaste={async () => {
-          const clipboardText = await readText();
-          if (clipboardText) editor?.chain().focus().insertContent(clipboardText).run();
+          const raw = await readText();
+          if (raw && editor) {
+            const text = raw.replace(/\r\n/g, '\n');
+            if (text.includes('\n')) {
+              editor.chain().focus().insertContent(pasteTextToHtml(text)).run();
+            } else {
+              editor.chain().focus().insertContent({ type: 'text', text }).run();
+            }
+          }
         }}
         onFind={() => setShowSearch(true)}
         onGoToLine={() => setShowGoToLine(true)}
