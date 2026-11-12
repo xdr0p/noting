@@ -135,10 +135,6 @@ const buildMathExpression = (expression: string, prevResult?: number | null) => 
     const valStr = prevResult !== null && prevResult !== undefined ? String(prevResult) : '0';
     expr = expr.replace(/ans/gi, valStr);
   }
-  
-  if (/^[\+\-\*\/]/.test(expr) && prevResult !== null && prevResult !== undefined) {
-    expr = `${prevResult}${expr}`;
-  }
 
   return normalizeSuperscriptForMath(expr)
     // Group negative exponents — output ^ (expr-eval operator)
@@ -280,17 +276,29 @@ const MathEngine = Extension.create({
     return [
       new InputRule({
         find: /([0-9a-zA-Z\+\-\*\/\^\.\(\)\s,⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾=]+)=$/,
-        handler: ({ state, range, match }) => {
-          const expression = match[1]; 
+        handler: ({ state, range }) => {
+          const $head = state.doc.resolve(range.to);
+          const textBeforeCursorInBlock = $head.parent.textBetween(0, $head.parentOffset, '\n', '\n');
+          const lastNewline = textBeforeCursorInBlock.lastIndexOf('\n');
+          const currentLineText = lastNewline !== -1 ? textBeforeCursorInBlock.slice(lastNewline + 1) : textBeforeCursorInBlock;
+
+          if (currentLineText.includes('=>')) return null;
+
+          const lineMatch = currentLineText.match(/([0-9a-zA-Z\+\-\*\/\^\.\(\)\s,⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾=]+)=$/);
+          if (!lineMatch) return null;
+
+          const expression = lineMatch[1]; 
           const leadingSpaces = expression.match(/^\s*/)?.[0] || '';
           const trimmed = expression.trim();
+          const from = $head.pos - lineMatch[0].length;
+          const to = range.to;
           
           // 1. Solve Equation (e.g., 10 = 3 + x or x * 1 = 5)
           if (trimmed.includes('=')) {
             const sol = solveLinearEquation(trimmed);
             if (sol) {
               const formattedEq = formatEquation(trimmed);
-              state.tr.insertText(`${leadingSpaces}${formattedEq}  =>  ${sol.variable} = ${sol.value.toLocaleString()} `, range.from, range.to);
+              state.tr.insertText(`${leadingSpaces}${formattedEq}  =>  ${sol.variable} = ${sol.value.toLocaleString()} `, from, to);
               return;
             }
           }
@@ -300,7 +308,7 @@ const MathEngine = Extension.create({
             const [intPart, decPart] = trimmed.split('.');
             const formattedInt = Number(intPart).toLocaleString();
             const formatted = decPart !== undefined ? `${formattedInt}.${decPart}` : formattedInt;
-            state.tr.insertText(`${leadingSpaces}${formatted} = `, range.from, range.to);
+            state.tr.insertText(`${leadingSpaces}${formatted} = `, from, to);
             return;
           }
 
@@ -309,7 +317,7 @@ const MathEngine = Extension.create({
           const varMatch = cleanForVar.match(/(?:^|[^a-zA-Z])([a-zA-Z])(?:[^a-zA-Z]|$)/);
           if (varMatch && !trimmed.includes('=')) {
             const formatted = formatMathSide(trimmed);
-            state.tr.insertText(`${leadingSpaces}${formatted} = `, range.from, range.to);
+            state.tr.insertText(`${leadingSpaces}${formatted} = `, from, to);
             return;
           }
 
@@ -329,7 +337,7 @@ const MathEngine = Extension.create({
             targetExpr = afterEq;
           }
 
-          const prevResult = getPreviousLineResult(state.doc, range.from);
+          const prevResult = getPreviousLineResult(state.doc, from);
 
           try {
             const cleanExpr = buildMathExpression(targetExpr, prevResult);
@@ -340,7 +348,7 @@ const MathEngine = Extension.create({
             const rounded = Math.round(result * 10000) / 10000;
             const formattedExpr = formatMathExpression(targetExpr);                          
             
-            state.tr.insertText(`${leadingSpaces}${prefix}${formattedExpr} = ${rounded.toLocaleString()} `, range.from, range.to);
+            state.tr.insertText(`${leadingSpaces}${prefix}${formattedExpr} = ${rounded.toLocaleString()} `, from, to);
           } catch (e) {
             return null; 
           }
@@ -358,8 +366,13 @@ const MathEngine = Extension.create({
 
         if (!$head) return false;
 
-        const textBeforeCursor = $head.parent.textBetween(0, $head.parentOffset, undefined, ' ');
-        const match = textBeforeCursor.match(/([0-9a-zA-Z\+\-\*\/\^\.\(\)\s,⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾=]+)$/);
+        const textBeforeCursorInBlock = $head.parent.textBetween(0, $head.parentOffset, '\n', '\n');
+        const lastNewline = textBeforeCursorInBlock.lastIndexOf('\n');
+        const currentLineText = lastNewline !== -1 ? textBeforeCursorInBlock.slice(lastNewline + 1) : textBeforeCursorInBlock;
+
+        if (currentLineText.includes('=>')) return false;
+
+        const match = currentLineText.match(/([0-9a-zA-Z\+\-\*\/\^\.\(\)\s,⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁽⁾=]+)$/);
 
         if (match && match[1].trim() !== '') {
           const expression = match[1];

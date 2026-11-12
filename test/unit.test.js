@@ -26,9 +26,6 @@ const buildMathExpression = (expression, prevResult) => {
     const valStr = prevResult !== null && prevResult !== undefined ? String(prevResult) : '0';
     expr = expr.replace(/ans/gi, valStr);
   }
-  if (/^[\+\-\*\/]/.test(expr) && prevResult !== null && prevResult !== undefined) {
-    expr = `${prevResult}${expr}`;
-  }
   return normalizeSuperscriptForMath(expr)
     .replace(/\^(-?[0-9]+(?:\.[0-9]+)?)/g, (_match, exponent) => {
       return `^${exponent.startsWith('-') ? `(${exponent})` : exponent}`;
@@ -111,7 +108,10 @@ assert.equal(mathParser.parse(buildMathExpression('2(3)')).evaluate(), 6);
 assert.equal(mathParser.parse(buildMathExpression('(2)(3)')).evaluate(), 6);
 assert.equal(mathParser.parse(buildMathExpression('(2)3')).evaluate(), 6);
 assert.equal(mathParser.parse(buildMathExpression('ans+1', 4)).evaluate(), 5);
-assert.equal(mathParser.parse(buildMathExpression('+5', 10)).evaluate(), 15);
+assert.equal(mathParser.parse(buildMathExpression('ans+5', 10)).evaluate(), 15);
+// Standalone operator expressions without left operand throw and do not evaluate
+assert.throws(() => mathParser.parse(buildMathExpression('* 2', 4)).evaluate());
+assert.throws(() => mathParser.parse(buildMathExpression('/ 2', 4)).evaluate());
 
 // Linear equation solving
 assert.deepEqual(solveLinearEquation('x+2=5'), { variable: 'x', value: 3 });
@@ -182,5 +182,8 @@ assert.equal(resolveMathExpression('2 * 2 = 4 * 2 = 8 + 10'), '2 * 2 = 4 * 2 = 8
 // Already solved equation (no operator after last '=') does not re-evaluate or mangle
 assert.equal(resolveMathExpression('2 * 2 = 4'), null);
 assert.equal(resolveMathExpression('2 * 2 = 4 '), null);
+// Line containing '=>' does not evaluate or append another '=>'
+assert.equal(resolveMathExpression('x * 1 = 6 => x = 6 / 2'), null);
+assert.equal(resolveMathExpression('x * 1 = 6 => x = 6'), null);
 
-console.log('✓ All 32 tests passed successfully.');
+console.log('✓ All 41 tests passed successfully.');
